@@ -139,3 +139,34 @@ token only (older app versions). A device registered with a relay token is
 sent through the relay; if the relay answers `gone` the device is removed. An
 instance can disable the relay (`PUSH_RELAY=off`) or point to another relay
 (`PUSH_RELAY_URL`).
+
+## 6. Amendments (v1.1, binding)
+
+Decided after the first relay implementation; all three sides implement these.
+
+1. **Payload size**: `payload` ≤ 2800 bytes decoded (keeps the final APNs/FCM
+   message under 4096 bytes). Instances shorten `body` before encrypting.
+2. **Registration rate**: 120 registrations per IP and hour (IPv6 per /64).
+3. **`forbidden`** is answered for unknown, expired and other-instance tokens
+   alike. Instances treat `forbidden` like `gone` and drop the device's relay
+   registration.
+4. **Android**: the FCM data message also carries `type: "alert" | "background"`.
+5. **Replay**: the send body carries a random top-level `requestId`
+   (base64url, 16 bytes). The relay rejects a repeated `(instance, requestId)`
+   within the timestamp window with `409`. Unknown top-level fields are ignored.
+6. **HTTP errors** (whole request): 400 invalid body, 401 bad/missing signature
+   or unknown key, 403 blocked instance, 409 replayed, 413 too large,
+   415 not JSON, 429 rate limited (`Retry-After`), 502 upstream failure.
+   `Flowplan-Instance` must equal `new URL(x).origin` exactly.
+7. **Defaults**: priority `high` for alert, `normal` for background;
+   `ttl` 86400.
+8. **iOS placeholder**: the relay sends `alert: { "title-loc-key":
+   "FP_PUSH_TITLE", "loc-key": "FP_PUSH_BODY" }` (no literal text); the app
+   ships these keys in its Localizable.strings (de/en/fr). The Notification
+   Service Extension replaces them after decrypting.
+9. **Instance binding of ciphertext**: AES-GCM `aad` and HKDF `info` are both
+   `"flowplan-push-v1\n" + instance` (the instance origin exactly as in
+   `Flowplan-Instance`). The app stores keys per instance and uses that
+   instance's origin when decrypting. The app also ignores messages whose
+   `sentAt` is older than 7 days and notification `id`s it has already shown
+   (remember the last 200).
