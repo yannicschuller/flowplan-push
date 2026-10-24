@@ -4,6 +4,12 @@ updates:
     directory: /
     schedule: { interval: weekly }
     open-pull-requests-limit: 5
+    # Major versions need a deliberate upgrade (Node 22 runtime types,
+    # compiler and linter changes) – minor and patch updates come in on
+    # their own.
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: weekly }
