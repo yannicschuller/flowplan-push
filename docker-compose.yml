@@ -1,0 +1,32 @@
+# Example deployment (Coolify can import this file directly).
+# Secrets belong in Coolify's environment variables / an .env file – never commit them.
+services:
+  push:
+    image: ghcr.io/yannicschuller/flowplan-push:latest
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: ["/tmp:size=16m,mode=1777"]
+    environment:
+      RELAY_PUBLIC_URL: ${RELAY_PUBLIC_URL:-https://push.flowplan.org}
+      RELAY_STORAGE_KEY: ${RELAY_STORAGE_KEY:?generate with: openssl rand -base64 32}
+      RELAY_STORAGE_KEYS_OLD: ${RELAY_STORAGE_KEYS_OLD:-}
+      APNS_KEY_ID: ${APNS_KEY_ID:-}
+      APNS_TEAM_ID: ${APNS_TEAM_ID:-V7N2K54KJN}
+      APNS_KEY: ${APNS_KEY:-}
+      FCM_SERVICE_ACCOUNT: ${FCM_SERVICE_ACCOUNT:-}
+      FCM_PROJECT_ID: ${FCM_PROJECT_ID:-}
+      ALLOWED_BUNDLE_IDS: ${ALLOWED_BUNDLE_IDS:-app.flowplan.mobile}
+      TRUST_PROXY: ${TRUST_PROXY:-1}
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - push-data:/data
+    # Behind Coolify/Traefik no port mapping is needed; for a plain Docker host
+    # put a TLS-terminating reverse proxy in front and keep this on localhost.
+    ports:
+      - "127.0.0.1:8080:8080"
+
+volumes:
+  push-data:
