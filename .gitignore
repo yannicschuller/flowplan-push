@@ -1,0 +1,14 @@
+node_modules/
+dist/
+data/
+*.db
+*.db-wal
+*.db-shm
+*.p8
+*.pem
+.env
+.env.*
+!.env.example
+service-account*.json
+google-services.json
+coverage/

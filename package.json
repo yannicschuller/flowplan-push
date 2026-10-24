@@ -1,0 +1,31 @@
+{
+  "name": "flowplan-push",
+  "version": "1.0.0",
+  "description": "Flowplan push relay: forwards end-to-end encrypted notifications from Flowplan instances to APNs and FCM",
+  "license": "AGPL-3.0-only",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node --disable-warning=ExperimentalWarning dist/src/index.js",
+    "dev": "node --disable-warning=ExperimentalWarning src/index.ts",
+    "admin": "node --disable-warning=ExperimentalWarning src/cli.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "biome check .",
+    "format": "biome check --write .",
+    "test": "node --disable-warning=ExperimentalWarning --test --test-concurrency=1 \"tests/**/*.test.ts\"",
+    "vectors": "node scripts/gen-vectors.ts",
+    "audit": "npm audit --audit-level=low"
+  },
+  "dependencies": {
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.15",
+    "@types/node": "22.20.5",
+    "typescript": "6.0.3"
+  }
+}
