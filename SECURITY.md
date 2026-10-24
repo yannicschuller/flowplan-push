@@ -40,8 +40,8 @@ database leak) cannot send without the instance's private key. A token alone onl
 `DELETE` of that registration, which the app repairs by re-registering.
 
 **An attacker replaying a captured send request**: requests older or newer than 5 minutes are
-rejected. Within the window the relay remembers every accepted signature and rejects
-duplicates. TLS between instance and relay normally prevents capture in the first place.
+rejected. Within the window the relay remembers every accepted `(instance, requestId)` and
+every accepted signature, and rejects repeats with `409`. TLS between instance and relay normally prevents capture in the first place.
 
 **An attacker who reads the relay database** (backup leak, disk access) gets ciphertext device
 tokens, without `RELAY_STORAGE_KEY`, which lives only in the environment, and relay token
@@ -67,7 +67,7 @@ Response bodies are parsed only as the well-known JSON and never reflected to th
 
 **An attacker flooding the relay**: request bodies are limited (512 KB for send, 8 KB for
 register), as are message counts (100), header size, and request and header timeouts.
-Per-IP limits apply (30 registrations/hour, 120 send/delete requests/minute; IPv6 counted per
+Per-IP limits apply (120 registrations/hour, 120 send/delete requests/minute; IPv6 counted per
 /64), as does a per-IP lock-out after 30 authentication failures in 10 minutes. The
 per-instance limit (600 messages/minute, burst 100) is counted only after the signature has
 been verified, so nobody can use up another instance's quota. All in-memory tables are
@@ -93,7 +93,11 @@ CSP, `frame-ancestors 'none'`, `no-store` and HSTS.
 - **Sender authentication of payloads**: the E2E scheme is ECIES-style. It proves that the
   sender knew the device's public key, not that the sender was a specific instance. The device
   public key is only given to the instance, and the relay binds tokens to instances, so a third
-  party would need both the relay token and the instance's signing key.
+  party would need both the relay token and the instance's signing key. The ciphertext is bound
+  to the instance origin (HKDF info and AES-GCM aad `"flowplan-push-v1\n" + instance`), so a
+  payload made for one instance does not decrypt as another instance's notification. A
+  malicious relay could re-deliver an old ciphertext of the same instance. The app limits that
+  by ignoring messages whose `sentAt` is older than 7 days and ids it has already shown.
 - Traffic analysis by timing and size. Payloads are not padded, so instances that care should
   pad plaintexts to a few fixed sizes.
 

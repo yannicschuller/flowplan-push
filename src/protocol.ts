@@ -7,7 +7,8 @@ import { RELAY_TOKEN_PATTERN } from "./crypto/tokens.ts";
 export const MAX_SEND_BODY_BYTES = 512 * 1024;
 export const MAX_REGISTER_BODY_BYTES = 8 * 1024;
 export const MAX_MESSAGES = 100;
-export const MAX_PAYLOAD_BYTES = 3000;
+/** PROTOCOL §6.1 (v1.1): ≤ 2800 bytes decoded keeps APNs/FCM messages under 4096 bytes. */
+export const MAX_PAYLOAD_BYTES = 2800;
 export const MAX_CONTENT_STATE_BYTES = 2048;
 export const MAX_TTL_SECONDS = 2_419_200;
 /** Envelope: version (1) + ephemeral public key (32) + nonce (12) + GCM tag (16). */
@@ -92,7 +93,11 @@ export const messageSchema = z
 export type Message = z.infer<typeof messageSchema>;
 
 /** Top-level body; messages are validated one by one so a bad message only fails itself. */
+/** PROTOCOL §6.5: random requestId, 16 bytes base64url (22 chars, unpadded). */
+export const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{21}[AQgw](==)?$/;
+
 export const sendBodySchema = z.object({
+  requestId: z.string().regex(REQUEST_ID_PATTERN),
   messages: z.array(z.unknown()).min(1).max(MAX_MESSAGES),
 });
 

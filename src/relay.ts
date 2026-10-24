@@ -31,7 +31,7 @@ export interface HttpResult {
 }
 
 export interface RelayLimits {
-  /** PROTOCOL §2: 30 registrations per IP and hour. */
+  /** PROTOCOL §6.2: 120 registrations per IP (IPv6: /64) and hour. */
   registerPerIpPerHour: number;
   /** PROTOCOL §3: 600 messages per minute per instance, burst 100. */
   instanceMessagesPerMinute: number;
@@ -45,7 +45,7 @@ export interface RelayLimits {
 }
 
 export const DEFAULT_LIMITS: RelayLimits = {
-  registerPerIpPerHour: 30,
+  registerPerIpPerHour: 120,
   instanceMessagesPerMinute: 600,
   instanceBurst: 100,
   requestsPerIpPerMinute: 120,
@@ -264,7 +264,14 @@ export class Relay {
       this.d.logger.warn("invalid signature", { instance, kid: sig.kid, ip: truncateIp(ip) });
       return this.authFailure(ipKey, "invalid_signature", 401, "invalid_signature");
     }
-    if (!this.replay.checkAndRemember(sig.sigText, sig.tsNum)) {
+    // PROTOCOL §6.5: a repeated (instance, requestId) within the window is a
+    // replay; an identical signature implies an identical body and is caught
+    // by the same check, the signature check stays as a second line.
+    const requestKey = `${instance}\n${parsedBody.data.requestId}`;
+    if (
+      !this.replay.checkAndRemember(requestKey, sig.tsNum) ||
+      !this.replay.checkAndRemember(`sig:${sig.sigText}`, sig.tsNum)
+    ) {
       return this.authFailure(ipKey, "replayed", 409, "replayed");
     }
 

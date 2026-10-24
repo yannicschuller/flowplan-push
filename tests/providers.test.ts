@@ -19,7 +19,7 @@ import {
 } from "./helpers.ts";
 
 const device = generateDeviceKey();
-const payload = encryptPayload(device.publicKey, {
+const payload = encryptPayload(INSTANCE, device.publicKey, {
   title: "t",
   body: "b",
   url: null,
@@ -82,7 +82,7 @@ describe("APNs request building", () => {
     assert.ok(b.ok);
     assert.deepEqual(b.request.payload, {
       aps: {
-        alert: { title: "Flowplan", body: "New notification" },
+        alert: { "title-loc-key": "FP_PUSH_TITLE", "loc-key": "FP_PUSH_BODY" },
         "mutable-content": 1,
         sound: "default",
         category: "task",

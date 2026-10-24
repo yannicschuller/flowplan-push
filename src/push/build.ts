@@ -11,8 +11,9 @@ import type { FcmMessage } from "./fcm.ts";
  */
 
 export const DEFAULT_TTL_SECONDS = 86_400;
-export const PLACEHOLDER_TITLE = "Flowplan";
-export const PLACEHOLDER_BODY = "New notification";
+/** PROTOCOL §6.8: localized by the app (Localizable.strings), replaced by the NSE after decrypting. */
+export const PLACEHOLDER_TITLE_LOC_KEY = "FP_PUSH_TITLE";
+export const PLACEHOLDER_BODY_LOC_KEY = "FP_PUSH_BODY";
 
 /** Canonical (unpadded) base64url form of the encrypted payload. */
 function canonicalPayload(payload: string | null | undefined): string {
@@ -48,7 +49,7 @@ export function buildApnsRequest(
 
   if (msg.type === "alert") {
     const aps: Record<string, unknown> = {
-      alert: { title: PLACEHOLDER_TITLE, body: PLACEHOLDER_BODY },
+      alert: { "title-loc-key": PLACEHOLDER_TITLE_LOC_KEY, "loc-key": PLACEHOLDER_BODY_LOC_KEY },
       "mutable-content": 1,
       sound: "default",
     };

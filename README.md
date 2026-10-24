@@ -82,8 +82,9 @@ with a service that:
    registered for**. For any other instance the relay answers `forbidden`, which looks the same
    as an unknown token.
 4. **The relay forwards** the ciphertext to APNs or FCM. On iOS the notification carries only the
-   placeholder "Flowplan – New notification" plus the encrypted `fp` field. The Notification
-   Service Extension decrypts it and shows the real title and text. On Android a data-only
+   localized placeholder (`title-loc-key: "FP_PUSH_TITLE"`, `loc-key: "FP_PUSH_BODY"`, which the
+   app's Localizable.strings resolve) plus the encrypted `fp` field. The Notification Service
+   Extension decrypts it and shows the real title and text. On Android a data-only
    message is decrypted by the app's messaging service.
 
 What this gives you:
@@ -93,9 +94,10 @@ What this gives you:
 | Someone wants to push to devices of another instance | Relay tokens are bound to the instance origin; sends are signed with that origin's key, published on that origin over HTTPS |
 | Relay database leaks | Device tokens are AES-256-GCM encrypted (key outside the DB); relay tokens are stored as SHA-256 hashes only; no content is ever stored |
 | Relay operator, Apple or Google read notifications | End-to-end encryption (X25519 + HKDF-SHA256 + AES-256-GCM); the relay holds no decryption keys |
-| Captured send request is replayed | Timestamp window ±5 min, and an identical signature is rejected within the window |
+| A ciphertext is re-sent through another instance | HKDF info and AES-GCM aad are `"flowplan-push-v1\n" + instance`, so a payload only decrypts for the instance it was made for; the app also drops stale (`sentAt` > 7 days) and already shown notification ids |
+| Captured send request is replayed | Timestamp window ±5 min, and a repeated `(instance, requestId)` (and an identical signature) is rejected with 409 within the window |
 | Relay abused for SSRF / port scans | Well-known fetch: HTTPS only, DNS resolved once and every address checked (private, loopback, link-local, CGNAT, multicast, reserved, IPv4-mapped/NAT64/6to4 IPv6), connection pinned to the checked address, no cross-origin redirects, 5 s timeout, 16 KB limit, at most one fetch per origin per minute; origins without any registration are never fetched |
-| Flooding | Per-IP limits (30 registrations/hour, 120 requests/minute, lock-out after repeated auth failures), per-instance limit (600 messages/minute, burst 100), body ≤ 512 KB, ≤ 100 messages |
+| Flooding | Per-IP limits (120 registrations/hour, 120 requests/minute, lock-out after repeated auth failures), per-instance limit (600 messages/minute, burst 100), body ≤ 512 KB, ≤ 100 messages |
 | Abusive instance | `admin block <origin>`: registrations and sends refused immediately |
 
 The full threat model, including what the relay *cannot* protect against, is in
@@ -241,7 +243,10 @@ After adding the extension, run **iOS setup** once with *Register the App IDs* a
 
 The app registers with the relay directly (`POST /v1/devices`). It creates one X25519 key pair
 per (installation, instance) and passes the relay token and the public key to the instance. It
-re-registers at least every 30 days and whenever the APNs/FCM token changes. The test vectors
+decrypts with that instance's origin in the HKDF info and AES-GCM aad (PROTOCOL §6.9). It
+ignores notifications whose `sentAt` is older than 7 days and ids it has already shown (the
+last 200). The app ships the placeholder keys `FP_PUSH_TITLE` and `FP_PUSH_BODY` in its
+Localizable.strings (de/en/fr). It re-registers at least every 30 days and whenever the APNs/FCM token changes. The test vectors
 in [`docs/test-vectors.json`](docs/test-vectors.json) let the Swift/Kotlin decryption be checked
 against the reference implementation.
 
@@ -383,12 +388,20 @@ Notes for implementers:
 
 - `Flowplan-Instance` must be the canonical origin, exactly as `new URL(x).origin` produces it.
   It is part of the signed string.
-- Two requests with the same body and timestamp have the same signature (Ed25519 is
-  deterministic), so the second is rejected as a replay. Unknown top-level fields are ignored.
-  Include e.g. a random `"requestId"` in the body if you might send the same batch twice within
-  a second.
-- Unknown, expired and foreign relay tokens all give `forbidden`. An instance should treat
-  `forbidden` like `gone` and drop the device.
+- Every send body needs a top-level `requestId`: 16 random bytes, base64url (PROTOCOL §6.5).
+  Without it the request is `400`. A repeated `(instance, requestId)` within the timestamp
+  window gives `409 replayed`, so use a fresh id for every request, retries included. Unknown
+  top-level fields are ignored.
+- `payload` may be at most 2800 bytes decoded (§6.1). Instances shorten `body` before
+  encrypting.
+- Defaults (§6.7): `priority` is `high` for alert and `normal` for background, and `ttl` is
+  86400.
+- Unknown, expired and foreign relay tokens all give `forbidden` (§6.3). The instance treats
+  `forbidden` like `gone` and drops the device's relay registration.
+- Ciphertext is bound to the instance (§6.9): HKDF info and AES-GCM aad are both
+  `"flowplan-push-v1\n" + instance`, with the origin exactly as in `Flowplan-Instance`.
+- Android data messages carry `fp`, `type` (`alert`/`background`) and, when set, `category`,
+  `collapseId` and `badge` (strings).
 - Requests to the relay must use `Content-Type: application/json` and no content encoding.
 
 ## Development

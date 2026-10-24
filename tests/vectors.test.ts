@@ -45,14 +45,20 @@ describe("test vectors (PROTOCOL §3, §4)", () => {
         shared,
         Buffer.from(v.ephemeralPublicKey, "base64url"),
         Buffer.from(v.devicePublicKey, "base64url"),
+        v.instance,
       );
       assert.equal(key.toString("hex"), v.keyHex);
-      const payload = encryptPayload(v.devicePublicKey, v.plaintext, {
+      assert.equal(v.hkdfInfo, `flowplan-push-v1\n${v.instance}`);
+      assert.equal(v.aad, v.hkdfInfo);
+      assert.equal(Buffer.from(v.aadHex, "hex").toString("utf8"), v.aad);
+      const payload = encryptPayload(v.instance, v.devicePublicKey, v.plaintext, {
         ephemeralPrivateKey: ephPriv,
         nonce: Buffer.from(v.nonceHex, "hex"),
       });
       assert.equal(payload, v.payload);
-      assert.equal(decryptPayload(devicePriv, v.payload), v.plaintext);
+      assert.equal(decryptPayload(devicePriv, v.instance, v.payload), v.plaintext);
+      // The ciphertext is bound to the instance origin (PROTOCOL §6.9).
+      assert.throws(() => decryptPayload(devicePriv, "https://other.example.com", v.payload));
       // The relay accepts the payload as a message payload.
       assert.ok(
         messageSchema.safeParse({ to: "A".repeat(43), type: "alert", payload: v.payload }).success,
@@ -62,7 +68,9 @@ describe("test vectors (PROTOCOL §3, §4)", () => {
 
   for (const v of vectors.e2e.invalid) {
     it(`e2e invalid vector "${v.name}" fails to decrypt`, () => {
-      assert.throws(() => decryptPayload(x25519PrivateKey(v.devicePrivateKey), v.payload));
+      assert.throws(() =>
+        decryptPayload(x25519PrivateKey(v.devicePrivateKey), v.instance, v.payload),
+      );
     });
   }
 

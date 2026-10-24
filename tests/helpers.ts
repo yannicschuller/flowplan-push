@@ -2,7 +2,12 @@ import { generateKeyPairSync, type KeyObject, randomBytes } from "node:crypto";
 import http from "node:http";
 import http2 from "node:http2";
 import type { AddressInfo } from "node:net";
-import { generateInstanceKey, type InstanceKey, signRequest } from "../examples/instance.ts";
+import {
+  generateInstanceKey,
+  type InstanceKey,
+  newRequestId,
+  signRequest,
+} from "../examples/instance.ts";
 import { StorageCipher } from "../src/crypto/storage.ts";
 import { Store } from "../src/db.ts";
 import { createHttpServer } from "../src/http/server.ts";
@@ -287,7 +292,7 @@ export async function startRelay(opts: TestRelayOptions = {}) {
   }
 
   const send = (messages: unknown[], o: Parameters<typeof sendRaw>[1] = {}) =>
-    sendRaw(JSON.stringify({ messages, requestId: randomBytes(8).toString("hex") }), o);
+    sendRaw(JSON.stringify({ requestId: newRequestId(), messages }), o);
 
   return {
     url,

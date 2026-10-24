@@ -1,13 +1,13 @@
 /**
- * Reference implementation of the instance side of PROTOCOL v1 (and of the
+ * Reference implementation of the instance side of PROTOCOL v1.1 (and of the
  * device-side decryption), using only node:crypto. The relay's tests use it;
  * instance and app implementations can be checked against it and against
  * docs/test-vectors.json.
  *
  *   const id = generateInstanceKey();                 // persist id.privateKey
  *   GET /.well-known/flowplan-push → wellKnownDocument([id])
- *   const payload = encryptPayload(devicePublicKey, { title, body, … });
- *   const body = JSON.stringify({ messages: [{ to, type: "alert", payload, … }] });
+ *   const payload = encryptPayload(instance, devicePublicKey, { title, body, … });
+ *   const body = JSON.stringify({ requestId: newRequestId(), messages: [{ to, type: "alert", payload, … }] });
  *   fetch(`${relay}/v1/send`, { method: "POST", body,
  *     headers: { "content-type": "application/json", ...signRequest({ instance, kid, privateKey, body }) } });
  */
@@ -26,6 +26,19 @@ import {
 } from "node:crypto";
 
 export const CONTEXT = "flowplan-push-v1";
+
+/**
+ * §6.9: HKDF info and AES-GCM aad bind the ciphertext to the instance origin
+ * (exactly as sent in Flowplan-Instance).
+ */
+export function e2eContext(instance: string): string {
+  return `${CONTEXT}\n${instance}`;
+}
+
+/** §6.5: random top-level requestId of every send body (16 bytes, base64url). */
+export function newRequestId(): string {
+  return randomBytes(16).toString("base64url");
+}
 
 // ---- Ed25519 instance identity (§1, §3) ----------------------------------
 
@@ -120,9 +133,20 @@ export function generateDeviceKey(): { privateKey: KeyObject; publicKey: string 
   return { privateKey, publicKey: rawPublic(publicKey).toString("base64url") };
 }
 
-export function deriveKey(shared: Buffer, ephemeralPublic: Buffer, devicePublic: Buffer): Buffer {
+export function deriveKey(
+  shared: Buffer,
+  ephemeralPublic: Buffer,
+  devicePublic: Buffer,
+  instance: string,
+): Buffer {
   return Buffer.from(
-    hkdfSync("sha256", shared, Buffer.concat([ephemeralPublic, devicePublic]), CONTEXT, 32),
+    hkdfSync(
+      "sha256",
+      shared,
+      Buffer.concat([ephemeralPublic, devicePublic]),
+      e2eContext(instance),
+      32,
+    ),
   );
 }
 
@@ -133,6 +157,7 @@ export interface EncryptOptions {
 }
 
 export function encryptPayload(
+  instance: string,
   devicePublicKey: string,
   plaintext: string | object,
   opts: EncryptOptions = {},
@@ -145,17 +170,21 @@ export function encryptPayload(
     privateKey: ephemeral,
     publicKey: x25519PublicKey(devicePublicKey),
   });
-  const key = deriveKey(shared, ephemeralPub, devicePub);
+  const key = deriveKey(shared, ephemeralPub, devicePub, instance);
   const nonce = opts.nonce ?? randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", key, nonce);
-  cipher.setAAD(Buffer.from(CONTEXT, "utf8"));
+  cipher.setAAD(Buffer.from(e2eContext(instance), "utf8"));
   const text = typeof plaintext === "string" ? plaintext : JSON.stringify(plaintext);
   const ct = Buffer.concat([cipher.update(text, "utf8"), cipher.final(), cipher.getAuthTag()]);
   return Buffer.concat([Buffer.from([0x01]), ephemeralPub, nonce, ct]).toString("base64url");
 }
 
 /** Device side (what the Notification Service Extension / messaging service does). Throws on failure. */
-export function decryptPayload(devicePrivateKey: KeyObject, payload: string): string {
+export function decryptPayload(
+  devicePrivateKey: KeyObject,
+  instance: string,
+  payload: string,
+): string {
   const raw = Buffer.from(payload, "base64url");
   if (raw.length < 1 + 32 + 12 + 16 || raw[0] !== 0x01) throw new Error("unsupported payload");
   const ephemeralPub = raw.subarray(1, 33);
@@ -167,9 +196,9 @@ export function decryptPayload(devicePrivateKey: KeyObject, payload: string): st
     privateKey: devicePrivateKey,
     publicKey: x25519PublicKey(ephemeralPub.toString("base64url")),
   });
-  const key = deriveKey(shared, ephemeralPub, devicePub);
+  const key = deriveKey(shared, ephemeralPub, devicePub, instance);
   const decipher = createDecipheriv("aes-256-gcm", key, nonce);
-  decipher.setAAD(Buffer.from(CONTEXT, "utf8"));
+  decipher.setAAD(Buffer.from(e2eContext(instance), "utf8"));
   decipher.setAuthTag(tag);
   return Buffer.concat([decipher.update(ct), decipher.final()]).toString("utf8");
 }

@@ -4,6 +4,7 @@ import {
   encryptPayload,
   generateDeviceKey,
   generateInstanceKey,
+  newRequestId,
   signRequest,
 } from "../examples/instance.ts";
 import { apnsToken, BUNDLE, fcmToken, INSTANCE, startRelay, type TestRelay } from "./helpers.ts";
@@ -18,7 +19,7 @@ const plaintext = {
   data: null,
   sentAt: 1,
 };
-const payload = () => encryptPayload(device.publicKey, plaintext);
+const payload = () => encryptPayload(INSTANCE, device.publicKey, plaintext);
 const alert = (to: string, extra: Record<string, unknown> = {}) => ({
   to,
   type: "alert",
@@ -156,7 +157,7 @@ describe("registration (POST /v1/devices)", () => {
     assert.equal(pre.headers.get("access-control-allow-origin"), null);
   });
 
-  it("rate-limits registrations to 30 per IP and hour", async () => {
+  it("rate-limits registrations to 120 per IP and hour", async () => {
     relay = await startRelay();
     const base = {
       platform: "ios",
@@ -164,7 +165,7 @@ describe("registration (POST /v1/devices)", () => {
       bundleId: BUNDLE,
       instance: INSTANCE,
     };
-    for (let i = 0; i < 30; i++) {
+    for (let i = 0; i < 120; i++) {
       assert.equal((await relay.register({ ...base, token: apnsToken() })).status, 201, `#${i}`);
     }
     const r = await relay.register({ ...base, token: apnsToken() });
@@ -251,8 +252,8 @@ describe("sending (POST /v1/send)", () => {
     assert.equal(call?.headers[":path"], `/3/device/${ios.deviceToken}`);
     assert.equal(call?.body.fp, p);
     assert.deepEqual((call?.body.aps as Record<string, unknown> | undefined)?.alert, {
-      title: "Flowplan",
-      body: "New notification",
+      "title-loc-key": "FP_PUSH_TITLE",
+      "loc-key": "FP_PUSH_BODY",
     });
     const fcm = JSON.parse(relay.fcmMock?.sendCalls[0]?.body ?? "{}");
     assert.equal(fcm.message.token, android.deviceToken);
@@ -264,7 +265,7 @@ describe("sending (POST /v1/send)", () => {
   it("rejects invalid, expired, wrong-instance and replayed signatures", async () => {
     relay = await startRelay();
     const ios = await relay.registerIos();
-    const body = JSON.stringify({ messages: [alert(ios.relayToken)] });
+    const body = JSON.stringify({ requestId: newRequestId(), messages: [alert(ios.relayToken)] });
 
     // expired / future timestamps
     assert.deepEqual(
@@ -319,6 +320,34 @@ describe("sending (POST /v1/send)", () => {
     assert.deepEqual((await relay.sendRaw(body, { ts })).json, { results: [{ status: "ok" }] });
     assert.deepEqual((await relay.sendRaw(body, { ts })).json, { error: "replayed" });
     assert.equal(relay.apnsMock?.calls.length, 1);
+  });
+
+  it("requires a requestId and rejects a repeated (instance, requestId) with 409", async () => {
+    relay = await startRelay();
+    const ios = await relay.registerIos();
+    const requestId = newRequestId();
+    const messages = [alert(ios.relayToken)];
+    // missing or malformed requestId → 400
+    assert.equal((await relay.sendRaw(JSON.stringify({ messages }))).status, 400);
+    for (const bad of ["short", "x".repeat(22), Buffer.alloc(17).toString("base64url")]) {
+      assert.equal((await relay.sendRaw(JSON.stringify({ requestId: bad, messages }))).status, 400);
+    }
+    // same requestId with a different body and timestamp is still a replay
+    const now = Math.floor(Date.now() / 1000);
+    const ok = await relay.sendRaw(JSON.stringify({ requestId, messages }), { ts: now - 1 });
+    assert.deepEqual(ok.json, { results: [{ status: "ok" }] });
+    const again = await relay.sendRaw(JSON.stringify({ messages, requestId, extra: 1 }), {
+      ts: now,
+    });
+    assert.equal(again.status, 409);
+    assert.deepEqual(again.json, { error: "replayed" });
+    // padded form of a fresh id is accepted
+    const padded = `${newRequestId()}==`;
+    assert.equal(
+      (await relay.sendRaw(JSON.stringify({ requestId: padded, messages }))).status,
+      200,
+    );
+    assert.equal(relay.apnsMock?.calls.length, 2);
   });
 
   it("a token registered for another instance is forbidden (indistinguishable from unknown)", async () => {
@@ -389,12 +418,14 @@ describe("sending (POST /v1/send)", () => {
       instance: INSTANCE,
     });
     const laToken = String(la.json?.relayToken);
-    const tooBig = Buffer.alloc(3001, 1);
+    const tooBig = Buffer.alloc(2800, 1); // + version byte = 2801 > 2800
     const r = await relay.send([
-      alert(ios.relayToken),
+      alert(ios.relayToken, {
+        payload: Buffer.concat([Buffer.from([1]), Buffer.alloc(2799, 1)]).toString("base64url"),
+      }), // exactly 2800 bytes → accepted and under the APNs 4096-byte limit
       alert(ios.relayToken, {
         payload: Buffer.concat([Buffer.from([1]), tooBig]).toString("base64url"),
-      }), // > 3000 bytes
+      }), // 2801 bytes
       alert(ios.relayToken, {
         payload: Buffer.from([2, ...Buffer.alloc(80)]).toString("base64url"),
       }), // wrong version
@@ -449,7 +480,11 @@ describe("sending (POST /v1/send)", () => {
       400,
     );
     // > 512 KB body → 413
-    const huge = JSON.stringify({ messages: [alert(ios.relayToken)], pad: "x".repeat(520 * 1024) });
+    const huge = JSON.stringify({
+      requestId: newRequestId(),
+      messages: [alert(ios.relayToken)],
+      pad: "x".repeat(520 * 1024),
+    });
     assert.equal((await relay.sendRaw(huge)).status, 413);
     // body must be JSON
     assert.equal((await relay.sendRaw("[1,2")).status, 400);
@@ -482,7 +517,7 @@ describe("sending (POST /v1/send)", () => {
   it("locks out an IP after repeated authentication failures", async () => {
     relay = await startRelay({ limits: { authFailuresPerIpPer10Min: 3 } });
     const ios = await relay.registerIos();
-    const body = JSON.stringify({ messages: [alert(ios.relayToken)] });
+    const body = JSON.stringify({ requestId: newRequestId(), messages: [alert(ios.relayToken)] });
     const forged = generateInstanceKey(relay.instance.kid);
     for (let i = 0; i < 3; i++)
       assert.equal((await relay.sendRaw(body, { key: forged })).status, 401);
