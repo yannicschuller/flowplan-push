@@ -5,8 +5,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { generateKeyPair, SignJWT } from "jose";
-import { authorize } from "../src/admin/authz.ts";
+import { authorize, groupMatches } from "../src/admin/authz.ts";
+import { requestedScopes } from "../src/admin/oidc.ts";
 import { AdminSessions, readCookie } from "../src/admin/sessions.ts";
+import { deniedPage } from "../src/admin/views.ts";
 import { ConfigError, loadConfig, parseAdmin } from "../src/config.ts";
 import { StorageCipher } from "../src/crypto/storage.ts";
 import { Store } from "../src/db.ts";
@@ -568,6 +570,52 @@ describe("authorization rules", () => {
       authorize({ sub: "x", email: "admin@example.com", email_verified: "false" }, cfg()).ok,
       false,
     );
+  });
+});
+
+describe("groups from the provider", () => {
+  it("match regardless of case and a leading slash (Keycloak paths)", () => {
+    assert.equal(groupMatches("/Flowplan-Admins", "flowplan-admins"), true);
+    assert.equal(groupMatches("flowplan-admins", "/flowplan-admins"), true);
+    assert.equal(groupMatches("/org/flowplan-admins", "flowplan-admins"), false);
+    assert.equal(groupMatches("admins", ""), false);
+  });
+
+  it("request the groups scope when groups are configured and the provider offers it (Pocket ID)", () => {
+    const base = { scopes: ["openid", "email", "profile"], groups: ["admins"] };
+    assert.deepEqual(requestedScopes(base, { scopes_supported: ["openid", "groups"] }), [
+      "openid",
+      "email",
+      "profile",
+      "groups",
+    ]);
+    assert.deepEqual(requestedScopes(base, { scopes_supported: ["openid"] }), base.scopes);
+    assert.deepEqual(
+      requestedScopes({ ...base, groups: [] }, { scopes_supported: ["groups"] }),
+      base.scopes,
+    );
+    assert.deepEqual(
+      requestedScopes({ ...base, scopes: ["openid", "groups"] }, { scopes_supported: ["groups"] }),
+      ["openid", "groups"],
+    );
+  });
+
+  it("show the person what the provider sent when no rule matches, escaped", () => {
+    const c = loadConfig(adminEnv({ ADMIN_GROUPS: "relay-admins" })).admin;
+    assert.ok(c);
+    const missing = authorize({ sub: "u1", email: "x@example.com" }, c);
+    assert.equal(missing.ok, false);
+    if (missing.ok) return;
+    assert.equal(missing.diagnostics.groupsPresent, false);
+    assert.match(deniedPage(missing.diagnostics, true), /groups<\/code> scope/);
+    const other = authorize({ sub: "u1", groups: ["users", "<b>x</b>"] }, c);
+    assert.equal(other.ok, false);
+    if (other.ok) return;
+    assert.deepEqual(other.diagnostics.groups, ["users", "<b>x</b>"]);
+    const page = deniedPage(other.diagnostics, true);
+    assert.match(page, /<code>users<\/code>/);
+    assert.doesNotMatch(page, /<b>x<\/b>/);
+    assert.equal(authorize({ sub: "u1", groups: ["Relay-Admins"] }, c).ok, true);
   });
 });
 

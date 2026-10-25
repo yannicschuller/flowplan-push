@@ -1,5 +1,6 @@
 import { MESSAGE_STATUSES } from "../stats.ts";
 import type { AuditEntry } from "./actions.ts";
+import type { AuthzDiagnostics } from "./authz.ts";
 import {
   fmtAgo,
   fmtDuration,
@@ -85,6 +86,37 @@ export function messagePage(title: string, message: string, linkText = "Back"): 
   <h1>${title}</h1>
   <p>${message}</p>
   <p><a class="btn" href="/admin">${linkText}</a></p>
+</section>`,
+  );
+}
+
+/**
+ * Signed in at the provider, but no admin rule matched: shows what the
+ * provider sent about this person (their own data only), so the ADMIN_*
+ * variables can be set to match.
+ */
+export function deniedPage(d: AuthzDiagnostics, groupsConfigured: boolean): string {
+  const groups = !d.groupsPresent
+    ? html`<p>The token has no <code>${d.groupsClaim}</code> claim.${
+        groupsConfigured
+          ? html` Many providers only send groups for the <code>groups</code> scope (add it to <code>ADMIN_OIDC_SCOPES</code>) or need a groups mapper; Keycloak and Zitadel may use another claim name (<code>ADMIN_GROUPS_CLAIM</code>).`
+          : ""
+      }</p>`
+    : d.groups.length === 0
+      ? html`<p>The <code>${d.groupsClaim}</code> claim is empty.</p>`
+      : html`<p>Groups in <code>${d.groupsClaim}</code>:</p><ul>${d.groups.map((g) => html`<li><code>${g}</code></li>`)}</ul>`;
+  return page(
+    { title: "Not authorized" },
+    html`<section class="card narrow">
+  <h1>Not authorized</h1>
+  <p>Your account signed in successfully but is not an administrator of this relay. No admin rule matched what the identity provider sent:</p>
+  <ul>
+    <li>Subject (<code>ADMIN_SUBJECTS</code>): <code>${d.sub}</code></li>
+    <li>E-mail (<code>ADMIN_EMAILS</code>): ${d.email ? html`<code>${d.email}</code>${d.emailVerified === false ? " – not verified, so it does not count" : ""}` : "none"}</li>
+  </ul>
+  ${groups}
+  <p>Group names match regardless of case and of a leading slash.</p>
+  <p><a class="btn" href="/admin">Start again</a></p>
 </section>`,
   );
 }

@@ -36,6 +36,7 @@ export interface OidcMetadata {
   end_session_endpoint?: string;
   id_token_signing_alg_values_supported?: string[];
   token_endpoint_auth_methods_supported?: string[];
+  scopes_supported?: string[];
 }
 
 /** Asymmetric JWS algorithms accepted for ID tokens (no HS*, never "none"). */
@@ -254,6 +255,7 @@ export class OidcClient {
       jwks_uri: this.checkUrl(json.jwks_uri, "jwks_uri"),
       id_token_signing_alg_values_supported: strings(json.id_token_signing_alg_values_supported),
       token_endpoint_auth_methods_supported: strings(json.token_endpoint_auth_methods_supported),
+      scopes_supported: strings(json.scopes_supported),
     };
     if (json.userinfo_endpoint !== undefined)
       m.userinfo_endpoint = this.checkUrl(json.userinfo_endpoint, "userinfo_endpoint");
@@ -282,7 +284,7 @@ export class OidcClient {
     u.searchParams.set("response_type", "code");
     u.searchParams.set("client_id", this.cfg.clientId);
     u.searchParams.set("redirect_uri", this.cfg.redirectUri);
-    u.searchParams.set("scope", this.cfg.scopes.join(" "));
+    u.searchParams.set("scope", requestedScopes(this.cfg, meta).join(" "));
     u.searchParams.set("state", p.state);
     u.searchParams.set("nonce", p.nonce);
     u.searchParams.set("code_challenge", p.challenge);
@@ -444,6 +446,25 @@ export class OidcClient {
 }
 
 /** Claim lookup: exact name first (e.g. "urn:…:roles"), then a dotted path ("realm_access.roles"). */
+/**
+ * The configured scopes, plus "groups" when admins are matched by group, the
+ * provider offers that scope and it isn't requested yet (Pocket ID, Zitadel
+ * and others only put the groups claim into tokens for this scope).
+ */
+export function requestedScopes(
+  cfg: Pick<AdminConfig, "scopes" | "groups">,
+  meta: Pick<OidcMetadata, "scopes_supported">,
+): string[] {
+  const scopes = [...cfg.scopes];
+  if (
+    cfg.groups.length > 0 &&
+    !scopes.includes("groups") &&
+    meta.scopes_supported?.includes("groups")
+  )
+    scopes.push("groups");
+  return scopes;
+}
+
 export function getClaim(claims: Record<string, unknown>, name: string): unknown {
   if (name in claims) return claims[name];
   let cur: unknown = claims;

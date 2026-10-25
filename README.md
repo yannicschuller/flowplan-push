@@ -449,9 +449,16 @@ Then note the **issuer URL** (the `issuer` value of the provider's
 3. Save; copy **Client ID** and **Client Secret**. Restrict **Allowed User Groups** to your
    admins.
 4. Issuer: your Pocket ID URL, e.g. `https://id.example.com`.
-5. Relay: `ADMIN_EMAILS=…`, or for groups `ADMIN_OIDC_SCOPES="openid email profile groups"` and
-   `ADMIN_GROUPS=<group name>`. Pocket ID sign-ins use passkeys, which already gives you
-   phishing-resistant MFA.
+5. Relay: `ADMIN_EMAILS=…`, or `ADMIN_GROUPS=<group name>`. Pocket ID only puts the `groups`
+   claim into tokens for the `groups` scope; the relay requests it by itself when
+   `ADMIN_GROUPS` is set and the provider lists the scope (you can also set
+   `ADMIN_OIDC_SCOPES="openid email profile groups"`). Pocket ID sign-ins use passkeys, which
+   already gives you phishing-resistant MFA.
+
+If a sign-in ends with **Not authorized**, the page lists what the provider sent about you:
+the subject, the e-mail and whether it is verified, and the groups in `ADMIN_GROUPS_CLAIM` (or
+that the claim is missing). Set `ADMIN_SUBJECTS`, `ADMIN_EMAILS` or `ADMIN_GROUPS` to match.
+Group names match regardless of case and of a leading slash (Keycloak sends `/admins`).
 
 **Keycloak**
 

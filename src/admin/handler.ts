@@ -36,6 +36,7 @@ import {
   confirmPage,
   continuePage,
   dashboardPage,
+  deniedPage,
   instancePage,
   loginPage,
   messagePage,
@@ -591,10 +592,10 @@ export class AdminHandler {
     if (!authz.ok) {
       const who = typeof claims.email === "string" ? claims.email : claims.sub;
       this.d.actions.audit({ id: who, sub: claims.sub, ip }, "login_denied", null, authz.reason);
-      return fail(
+      return this.htmlResult(
         403,
-        "Not authorized",
-        "Your account signed in successfully but is not an administrator of this relay.",
+        deniedPage(authz.diagnostics, this.d.config.groups.length > 0),
+        clear,
       );
     }
     // Rotate: any previous session of this browser ends; the new id is fresh.
