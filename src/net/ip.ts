@@ -149,3 +149,101 @@ export function rateLimitKeyForIp(ip: string): string {
   for (let i = 0; i < 8; i += 2) groups.push((((b[i] ?? 0) << 8) | (b[i + 1] ?? 0)).toString(16));
   return `${groups.join(":")}::/64`;
 }
+
+/** Client IP without IPv4-mapped IPv6 wrapping ("::ffff:1.2.3.4" → "1.2.3.4"). */
+export function normalizeIp(ip: string): string {
+  const m = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(ip);
+  return m?.[1] ?? ip;
+}
+
+export interface Cidr {
+  network: string;
+  prefix: number;
+  family: "ipv4" | "ipv6";
+  /** Canonical text form: network address with host bits cleared, "/prefix". */
+  text: string;
+}
+
+function v4ToBytes(ip: string): number[] {
+  return ip.split(".").map(Number);
+}
+
+/**
+ * Parses "1.2.3.4", "1.2.3.0/24", "2001:db8::/32" (a bare address is a host
+ * route). Host bits are cleared in the canonical form. Returns null if invalid.
+ */
+export function parseCidr(input: string): Cidr | null {
+  const s = input.trim();
+  if (s.length === 0 || s.length > 64) return null;
+  const [addrRaw, prefixRaw, extra] = s.split("/");
+  if (extra !== undefined || !addrRaw) return null;
+  const addr = normalizeIp(addrRaw.replace(/^\[|\]$/g, ""));
+  const family = isIP(addr);
+  if (family === 0 || addr.includes("%")) return null;
+  const max = family === 4 ? 32 : 128;
+  if (prefixRaw !== undefined && !/^\d{1,3}$/.test(prefixRaw)) return null;
+  const prefix = prefixRaw === undefined ? max : Number(prefixRaw);
+  if (prefix < 0 || prefix > max) return null;
+  let bytes: number[];
+  if (family === 4) {
+    bytes = v4ToBytes(addr);
+    if (bytes.some((b) => !Number.isInteger(b) || b < 0 || b > 255)) return null;
+  } else {
+    const b = parseIPv6(addr);
+    if (!b) return null;
+    bytes = [...b];
+  }
+  for (let i = 0; i < bytes.length; i++) {
+    const bitsHere = Math.max(0, Math.min(8, prefix - i * 8));
+    const mask = bitsHere === 0 ? 0 : (0xff << (8 - bitsHere)) & 0xff;
+    bytes[i] = (bytes[i] ?? 0) & mask;
+  }
+  let network: string;
+  if (family === 4) {
+    network = bytes.join(".");
+  } else {
+    const groups: string[] = [];
+    for (let i = 0; i < 16; i += 2)
+      groups.push((((bytes[i] ?? 0) << 8) | (bytes[i + 1] ?? 0)).toString(16));
+    network = groups
+      .join(":")
+      .replace(/(^|:)0(:0)+(:|$)/, "::")
+      .replace(/:{3,}/, "::");
+  }
+  return {
+    network,
+    prefix,
+    family: family === 4 ? "ipv4" : "ipv6",
+    text: `${network}/${prefix}`,
+  };
+}
+
+/** Builds a matcher for a list of CIDRs; invalid entries are ignored. */
+export function cidrMatcher(cidrs: string[]): (ip: string) => boolean {
+  const v4 = new BlockList();
+  const v6 = new BlockList();
+  let n4 = 0;
+  let n6 = 0;
+  for (const c of cidrs) {
+    const p = parseCidr(c);
+    if (!p) continue;
+    if (p.family === "ipv4") {
+      v4.addSubnet(p.network, p.prefix, "ipv4");
+      n4++;
+    } else {
+      v6.addSubnet(p.network, p.prefix, "ipv6");
+      n6++;
+    }
+  }
+  return (ipRaw: string) => {
+    const ip = normalizeIp(ipRaw);
+    const family = isIP(ip);
+    if (family === 4) return n4 > 0 && v4.check(ip, "ipv4");
+    if (family === 6) return n6 > 0 && v6.check(ip, "ipv6");
+    return false;
+  };
+}
+
+export function ipInCidrs(ip: string, cidrs: string[]): boolean {
+  return cidrMatcher(cidrs)(ip);
+}

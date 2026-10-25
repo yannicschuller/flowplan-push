@@ -1,6 +1,7 @@
 # Flowplan push relay – protocol v1
 
-The relay (default `https://push.flowplan.org`) is the only party that holds
+The relay (the official one is `https://push.flowplan.org`, which apps and
+instances use by default) is the only party that holds
 Flowplan's APNs key and Firebase credentials. Instances – the operator's own
 and anyone's self-hosted ones – send through it without any credentials of
 their own. Content is end-to-end encrypted between instance and device: the
@@ -156,7 +157,11 @@ Decided after the first relay implementation; all three sides implement these.
    within the timestamp window with `409`. Unknown top-level fields are ignored.
 6. **HTTP errors** (whole request): 400 invalid body, 401 bad/missing signature
    or unknown key, 403 blocked instance, 409 replayed, 413 too large,
-   415 not JSON, 429 rate limited (`Retry-After`), 502 upstream failure.
+   415 not JSON, 429 rate limited (`Retry-After`), 502 upstream failure,
+   503 `relay_paused` (the operator paused all sending, `Retry-After`; treat
+   like any transient 5xx and retry later). Registration additionally answers
+   403 `ip_blocked` while the operator blocks the client's IP range
+   (temporary; the app retries on its next start).
    `Flowplan-Instance` must equal `new URL(x).origin` exactly.
 7. **Defaults**: priority `high` for alert, `normal` for background;
    `ttl` 86400.

@@ -79,7 +79,7 @@ export async function startMockApns(responder: ApnsResponder = () => ({ status: 
 
 export function apnsTestConfig() {
   const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
-  return { cfg: { keyId: "ABC123DEFG", teamId: "V7N2K54KJN", privateKey }, publicKey };
+  return { cfg: { keyId: "ABC123DEFG", teamId: "ABCDE12345", privateKey }, publicKey };
 }
 
 // ---- mock FCM + OAuth (HTTP/1.1) -------------------------------------------

@@ -22,6 +22,10 @@ const { logger } = app;
 
 if (!config.apns) logger.warn('APNs is not configured: iOS messages will return status "error"');
 if (!config.fcm) logger.warn('FCM is not configured: Android messages will return status "error"');
+if (app.store.getPause())
+  logger.warn(
+    "sending is PAUSED by an operator (kill switch); resume in the admin dashboard or CLI",
+  );
 if (config.allowPrivateInstances)
   logger.warn("ALLOW_PRIVATE_INSTANCES is enabled: do not use this on a public relay");
 
@@ -35,6 +39,9 @@ app.server.listen(config.port, config.host, () => {
     bundles: config.allowedBundleIds,
     trustProxyHops: config.trustProxyHops,
     metrics: !!config.metricsToken,
+    admin: config.admin
+      ? { issuer: config.admin.issuer, ipRestricted: !!config.admin.allowedIps }
+      : false,
   });
 });
 

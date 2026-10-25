@@ -156,9 +156,10 @@ describe("configuration", () => {
         RELAY_STORAGE_KEY: key,
         APNS_KEY: apnsKey,
         APNS_KEY_ID: "ABCDEFGHIJ",
+        APNS_TEAM_ID: "ABCDE12345",
         FCM_SERVICE_ACCOUNT: sa,
       });
-      assert.equal(c.apns?.teamId, "V7N2K54KJN");
+      assert.equal(c.apns?.teamId, "ABCDE12345");
       assert.equal(c.fcm?.projectId, "flowplan-12345");
     }
     assert.throws(
@@ -167,7 +168,18 @@ describe("configuration", () => {
       "key id missing",
     );
     assert.throws(
-      () => loadConfig({ RELAY_STORAGE_KEY: key, APNS_KEY: rsa, APNS_KEY_ID: "ABCDEFGHIJ" }),
+      () => loadConfig({ RELAY_STORAGE_KEY: key, APNS_KEY: ec, APNS_KEY_ID: "ABCDEFGHIJ" }),
+      /APNS_TEAM_ID/,
+      "team id is required (no built-in default)",
+    );
+    assert.throws(
+      () =>
+        loadConfig({
+          RELAY_STORAGE_KEY: key,
+          APNS_KEY: rsa,
+          APNS_KEY_ID: "ABCDEFGHIJ",
+          APNS_TEAM_ID: "ABCDE12345",
+        }),
       ConfigError,
       "not EC",
     );

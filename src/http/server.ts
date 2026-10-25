@@ -6,6 +6,11 @@ import type { RelayMetrics } from "../metrics.ts";
 import { MAX_REGISTER_BODY_BYTES, MAX_SEND_BODY_BYTES } from "../protocol.ts";
 import type { HttpResult, Relay } from "../relay.ts";
 
+/** Handles everything under /admin (see src/admin/handler.ts). */
+export interface AdminRoute {
+  handle(req: IncomingMessage, method: string, url: URL, ip: string): Promise<HttpResult>;
+}
+
 export interface ServerDeps {
   relay: Relay;
   metrics: RelayMetrics;
@@ -14,6 +19,8 @@ export interface ServerDeps {
   trustProxyHops: number;
   hsts: boolean;
   healthCheck?: () => boolean;
+  /** Admin dashboard; null/undefined = disabled, /admin answers 404. */
+  admin?: AdminRoute | null;
 }
 
 const SECURITY_HEADERS: Record<string, string> = {
@@ -41,7 +48,7 @@ class HttpError extends Error {
 
 /**
  * Client IP: the socket address, or – behind `trustProxyHops` reverse proxies
- * (Traefik in Coolify = 1) – the address that many hops back in
+ * (one Traefik/Caddy/nginx in front = 1) – the address that many hops back in
  * X-Forwarded-For. Entries added by the client itself are never trusted.
  */
 export function clientIp(req: IncomingMessage, trustProxyHops: number): string {
@@ -61,7 +68,10 @@ export function clientIp(req: IncomingMessage, trustProxyHops: number): string {
 
 function send(res: ServerResponse, result: HttpResult, hsts: boolean): void {
   if (res.headersSent) return;
-  const headers: Record<string, string> = { ...SECURITY_HEADERS, ...(result.headers ?? {}) };
+  const headers: Record<string, string | string[]> = {
+    ...SECURITY_HEADERS,
+    ...(result.headers ?? {}),
+  };
   if (hsts) headers["strict-transport-security"] = "max-age=63072000; includeSubDomains";
   let payload: string | undefined;
   if (result.body !== undefined) {
@@ -122,6 +132,7 @@ function routeName(method: string, path: string): string {
   if (path === "/v1/send") return "send";
   if (path === "/v1/devices") return "register";
   if (path.startsWith("/v1/devices/")) return "unregister";
+  if (path === "/admin" || path.startsWith("/admin/")) return "admin";
   return method === "GET" ? "not_found" : "other";
 }
 
@@ -132,9 +143,11 @@ export function createRequestHandler(deps: ServerDeps) {
     const method = req.method ?? "GET";
     const rawUrl = req.url ?? "/";
     let path: string;
+    let url: URL;
     try {
       if (rawUrl.length > 2048 || !rawUrl.startsWith("/")) throw new Error();
-      path = new URL(rawUrl, "http://relay.invalid").pathname;
+      url = new URL(rawUrl, "http://relay.invalid");
+      path = url.pathname;
     } catch {
       send(res, { status: 400, body: { error: "bad_request" } }, hsts);
       return;
@@ -142,7 +155,7 @@ export function createRequestHandler(deps: ServerDeps) {
     const route = routeName(method, path);
     let result: HttpResult;
     try {
-      result = await dispatch(method, path, req);
+      result = await dispatch(method, path, url, req);
     } catch (e) {
       if (e instanceof HttpError) {
         result = { status: e.status, body: { error: e.code } };
@@ -161,8 +174,21 @@ export function createRequestHandler(deps: ServerDeps) {
     }
   };
 
-  async function dispatch(method: string, path: string, req: IncomingMessage): Promise<HttpResult> {
+  async function dispatch(
+    method: string,
+    path: string,
+    url: URL,
+    req: IncomingMessage,
+  ): Promise<HttpResult> {
     const ip = clientIp(req, deps.trustProxyHops);
+
+    if (path === "/admin" || path.startsWith("/admin/")) {
+      if (!deps.admin) {
+        req.resume();
+        return notFound();
+      }
+      return deps.admin.handle(req, method, url, ip);
+    }
 
     if (path === "/healthz") {
       if (method !== "GET" && method !== "HEAD") return methodNotAllowed("GET, HEAD");

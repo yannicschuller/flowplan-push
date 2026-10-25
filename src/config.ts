@@ -1,8 +1,10 @@
-import { createPrivateKey, type KeyObject } from "node:crypto";
+import { createHash, createPrivateKey, type KeyObject } from "node:crypto";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { parseStorageKey } from "./crypto/storage.ts";
 import type { LogLevel } from "./log.ts";
+import { parseCidr } from "./net/ip.ts";
+import { isLocalhostName } from "./net/origin.ts";
 
 /** All configuration comes from environment variables; see README "Configuration". */
 
@@ -20,6 +22,32 @@ export interface FcmConfig {
   privateKey: KeyObject;
 }
 
+/** Optional OIDC-protected admin dashboard (README "Admin dashboard (OIDC)"). */
+export interface AdminConfig {
+  issuer: string;
+  clientId: string;
+  clientSecret: string | null;
+  scopes: string[];
+  /** `${RELAY_PUBLIC_URL}/admin/callback` */
+  redirectUri: string;
+  /** `${RELAY_PUBLIC_URL}/admin` (RP-initiated logout target). */
+  postLogoutRedirectUri: string;
+  /** Origin of RELAY_PUBLIC_URL; admin POSTs must carry exactly this Origin. */
+  publicOrigin: string;
+  emails: string[];
+  subjects: string[];
+  groups: string[];
+  groupsClaim: string;
+  /** CIDRs allowed to reach /admin at all; null = no IP restriction. */
+  allowedIps: string[] | null;
+  /** Redirect to the IdP's end_session_endpoint on logout (if it has one). */
+  rpLogout: boolean;
+  sessionIdleSeconds: number;
+  sessionAbsoluteSeconds: number;
+  /** Hash of everything that decides who is an admin; sessions from another config are invalid. */
+  fingerprint: string;
+}
+
 export interface Config {
   publicUrl: string;
   host: string;
@@ -34,6 +62,9 @@ export interface Config {
   trustProxyHops: number;
   metricsToken: string | null;
   logLevel: LogLevel;
+  admin: AdminConfig | null;
+  /** Build commit (image label), shown on the admin dashboard. */
+  commit: string | null;
 }
 
 type Env = Record<string, string | undefined>;
@@ -46,7 +77,7 @@ function bool(env: Env, name: string, def: boolean): boolean {
   throw new ConfigError(`${name} must be true or false`);
 }
 
-/** Reads `NAME` or the file named by `NAME_FILE` (Docker/Coolify secrets). */
+/** Reads `NAME` or the file named by `NAME_FILE` (Docker/Kubernetes secrets, mounted files). */
 function valueOrFile(env: Env, name: string): string | undefined {
   const direct = env[name];
   const file = env[`${name}_FILE`];
@@ -79,7 +110,11 @@ function parseApns(env: Env): ApnsConfig | null {
     throw new ConfigError("APNs needs both APNS_KEY (or APNS_KEY_FILE) and APNS_KEY_ID");
   if (!/^[A-Z0-9]{10}$/.test(keyId))
     throw new ConfigError("APNS_KEY_ID must be the 10-character key id");
-  const teamId = (env.APNS_TEAM_ID ?? "V7N2K54KJN").trim();
+  const teamId = (env.APNS_TEAM_ID ?? "").trim();
+  if (!teamId)
+    throw new ConfigError(
+      "APNs needs APNS_TEAM_ID: your 10-character Apple Team ID (developer.apple.com → Account → Membership details)",
+    );
   if (!/^[A-Z0-9]{10}$/.test(teamId))
     throw new ConfigError("APNS_TEAM_ID must be the 10-character team id");
   let privateKey: KeyObject;
@@ -134,6 +169,124 @@ function parseFcm(env: Env): FcmConfig | null {
   if (privateKey.asymmetricKeyType !== "rsa")
     throw new ConfigError("FCM service account key must be RSA");
   return { projectId, clientEmail, privateKey };
+}
+
+function list(env: Env, name: string): string[] {
+  return (env[name] ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+export const ADMIN_SESSION_IDLE_SECONDS = 30 * 60;
+export const ADMIN_SESSION_ABSOLUTE_SECONDS = 8 * 3600;
+
+export function parseAdmin(env: Env, publicUrl: string): AdminConfig | null {
+  const issuerRaw = env.ADMIN_OIDC_ISSUER?.trim();
+  const anyAdminVar = Object.keys(env).some(
+    (k) => k.startsWith("ADMIN_") && (env[k] ?? "").trim() !== "",
+  );
+  if (!issuerRaw) {
+    if (anyAdminVar)
+      throw new ConfigError("ADMIN_* variables are set but ADMIN_OIDC_ISSUER is missing");
+    return null;
+  }
+  let issuerUrl: URL;
+  try {
+    issuerUrl = new URL(issuerRaw);
+  } catch {
+    throw new ConfigError("ADMIN_OIDC_ISSUER must be an https URL");
+  }
+  if (issuerUrl.protocol !== "https:" || issuerUrl.username || issuerUrl.password) {
+    throw new ConfigError("ADMIN_OIDC_ISSUER must be an https URL without credentials");
+  }
+  if (issuerUrl.search || issuerUrl.hash)
+    throw new ConfigError("ADMIN_OIDC_ISSUER must not contain a query or fragment");
+
+  const pub = new URL(publicUrl);
+  if (pub.protocol !== "https:" && !isLocalhostName(pub.hostname)) {
+    throw new ConfigError(
+      "The admin dashboard needs an https RELAY_PUBLIC_URL (secure cookies); http is only allowed for localhost",
+    );
+  }
+  if (pub.pathname !== "/" && pub.pathname !== "") {
+    throw new ConfigError("The admin dashboard needs RELAY_PUBLIC_URL without a path");
+  }
+
+  const clientId = env.ADMIN_OIDC_CLIENT_ID?.trim();
+  if (!clientId || clientId.length > 255)
+    throw new ConfigError("ADMIN_OIDC_CLIENT_ID is required for the admin dashboard");
+  const clientSecret = valueOrFile(env, "ADMIN_OIDC_CLIENT_SECRET")?.trim() || null;
+
+  const scopes = (env.ADMIN_OIDC_SCOPES ?? "openid email profile")
+    .split(/[\s,]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (!scopes.includes("openid")) throw new ConfigError("ADMIN_OIDC_SCOPES must include openid");
+  if (scopes.some((s) => !/^[\x21\x23-\x5b\x5d-\x7e]+$/.test(s)))
+    throw new ConfigError("ADMIN_OIDC_SCOPES contains an invalid scope");
+
+  const emails = list(env, "ADMIN_EMAILS").map((e) => e.toLowerCase());
+  for (const e of emails) {
+    if (!/^[^\s@]+@[^\s@]+$/.test(e) || e.length > 254)
+      throw new ConfigError(`ADMIN_EMAILS contains an invalid address: ${e}`);
+  }
+  const subjects = list(env, "ADMIN_SUBJECTS");
+  const groups = list(env, "ADMIN_GROUPS");
+  const groupsClaim = (env.ADMIN_GROUPS_CLAIM ?? "groups").trim() || "groups";
+  if (!/^[A-Za-z0-9_:/.-]{1,200}$/.test(groupsClaim))
+    throw new ConfigError("ADMIN_GROUPS_CLAIM must be a claim name (dots for nested claims)");
+  if (emails.length === 0 && subjects.length === 0 && groups.length === 0) {
+    throw new ConfigError(
+      "The admin dashboard needs at least one of ADMIN_EMAILS, ADMIN_SUBJECTS or ADMIN_GROUPS; refusing to enable it for every account of the identity provider",
+    );
+  }
+
+  let allowedIps: string[] | null = null;
+  const ipList = list(env, "ADMIN_ALLOWED_IPS");
+  if (ipList.length > 0) {
+    allowedIps = ipList.map((c) => {
+      const p = parseCidr(c);
+      if (!p) throw new ConfigError(`ADMIN_ALLOWED_IPS contains an invalid address or CIDR: ${c}`);
+      return p.text;
+    });
+  }
+
+  const origin = pub.origin;
+  const fingerprint = createHash("sha256")
+    .update(
+      JSON.stringify({
+        v: 1,
+        issuer: issuerRaw,
+        clientId,
+        secret: clientSecret ? createHash("sha256").update(clientSecret).digest("hex") : null,
+        emails: [...emails].sort(),
+        subjects: [...subjects].sort(),
+        groups: [...groups].sort(),
+        groupsClaim,
+        origin,
+      }),
+    )
+    .digest("hex");
+
+  return {
+    issuer: issuerRaw,
+    clientId,
+    clientSecret,
+    scopes,
+    redirectUri: `${origin}/admin/callback`,
+    postLogoutRedirectUri: `${origin}/admin`,
+    publicOrigin: origin,
+    emails,
+    subjects,
+    groups,
+    groupsClaim,
+    allowedIps,
+    rpLogout: bool(env, "ADMIN_OIDC_RP_LOGOUT", true),
+    sessionIdleSeconds: ADMIN_SESSION_IDLE_SECONDS,
+    sessionAbsoluteSeconds: ADMIN_SESSION_ABSOLUTE_SECONDS,
+    fingerprint,
+  };
 }
 
 export function loadConfig(env: Env = process.env): Config {
@@ -204,5 +357,7 @@ export function loadConfig(env: Env = process.env): Config {
     trustProxyHops,
     metricsToken,
     logLevel,
+    admin: parseAdmin(env, publicUrl),
+    commit: (env.RELAY_COMMIT ?? "").trim().slice(0, 40) || null,
   };
 }

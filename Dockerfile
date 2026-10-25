@@ -12,6 +12,8 @@ RUN npm run build \
  && npm prune --omit=dev --ignore-scripts --no-audit --no-fund
 
 FROM ${NODE_IMAGE} AS runtime
+# Commit shown on the admin dashboard (CI passes the git SHA).
+ARG RELAY_COMMIT=""
 # OS security updates; drop npm/yarn/corepack (not needed at runtime, less attack surface).
 RUN apk upgrade --no-cache \
  && rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
@@ -20,7 +22,8 @@ RUN apk upgrade --no-cache \
 ENV NODE_ENV=production \
     NODE_OPTIONS=--disable-warning=ExperimentalWarning \
     DATA_DIR=/data \
-    PORT=8080
+    PORT=8080 \
+    RELAY_COMMIT=${RELAY_COMMIT}
 WORKDIR /app
 # Application files are owned by root and not writable by the runtime user.
 COPY --from=build /app/node_modules ./node_modules

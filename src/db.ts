@@ -10,8 +10,10 @@ import { generateRelayToken, hashRelayToken } from "./crypto/tokens.ts";
  *   - device tokens: AES-256-GCM ciphertext bound to the record (AAD), plus
  *     an HMAC lookup hash to find an existing registration for the same token
  *   - instance origin, platform, environment, bundle id, timestamps
- *   - blocked instance origins
- *   - daily delivery counters (no per-device data)
+ *   - blocked instance origins and (temporarily) blocked client IP ranges
+ *   - daily delivery counters and per-minute/per-hour aggregates (no per-device data)
+ *   - operator settings (emergency pause), admin sessions (hashed ids) and the
+ *     append-only admin audit log
  */
 
 export type Platform = "ios" | "ios-liveactivity" | "android";
@@ -77,6 +79,69 @@ CREATE TABLE IF NOT EXISTS blocked_instances (
   reason      TEXT,
   created_at  INTEGER NOT NULL
 ) STRICT;
+CREATE TABLE IF NOT EXISTS blocked_ips (
+  cidr        TEXT PRIMARY KEY,
+  reason      TEXT,
+  created_at  INTEGER NOT NULL,
+  expires_at  INTEGER NOT NULL,
+  created_by  TEXT
+) STRICT;
+CREATE TABLE IF NOT EXISTS settings (
+  key         TEXT PRIMARY KEY,
+  value       TEXT NOT NULL,
+  updated_at  INTEGER NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS stats_minute (
+  minute    INTEGER NOT NULL,
+  instance  TEXT NOT NULL,
+  kind      TEXT NOT NULL,
+  key       TEXT NOT NULL,
+  count     INTEGER NOT NULL,
+  PRIMARY KEY (minute, instance, kind, key)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS stats_hourly (
+  hour      INTEGER NOT NULL,
+  instance  TEXT NOT NULL,
+  kind      TEXT NOT NULL,
+  key       TEXT NOT NULL,
+  count     INTEGER NOT NULL,
+  PRIMARY KEY (hour, instance, kind, key)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS stats_hourly_instance ON stats_hourly (instance, hour);
+CREATE INDEX IF NOT EXISTS stats_minute_instance ON stats_minute (instance, minute);
+CREATE TABLE IF NOT EXISTS admin_sessions (
+  id_hash       TEXT PRIMARY KEY,
+  sub           TEXT NOT NULL,
+  email         TEXT,
+  name          TEXT,
+  csrf          TEXT NOT NULL,
+  config_fp     TEXT NOT NULL,
+  ip            TEXT,
+  created_at    INTEGER NOT NULL,
+  last_seen_at  INTEGER NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS admin_login_states (
+  state_hash    TEXT PRIMARY KEY,
+  binding_hash  TEXT NOT NULL,
+  nonce         TEXT NOT NULL,
+  verifier      TEXT NOT NULL,
+  created_at    INTEGER NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS admin_audit (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  at         INTEGER NOT NULL,
+  actor      TEXT NOT NULL,
+  actor_sub  TEXT,
+  action     TEXT NOT NULL,
+  target     TEXT,
+  reason     TEXT,
+  ip         TEXT,
+  details    TEXT
+) STRICT;
+CREATE TRIGGER IF NOT EXISTS admin_audit_no_update BEFORE UPDATE ON admin_audit
+  BEGIN SELECT RAISE(ABORT, 'admin_audit is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS admin_audit_no_delete BEFORE DELETE ON admin_audit
+  BEGIN SELECT RAISE(ABORT, 'admin_audit is append-only'); END;
 CREATE TABLE IF NOT EXISTS stats_daily (
   day       TEXT NOT NULL,
   platform  TEXT NOT NULL,
@@ -124,14 +189,34 @@ export class Store {
     );
     this.db.exec("PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;");
     this.db.exec(SCHEMA);
-    this.db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '1')").run();
+    this.migrate();
+    this.db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '2')").run();
+  }
+
+  /** Additive migrations for databases created by older versions. */
+  private migrate(): void {
+    const cols = new Set(
+      (
+        this.db.prepare("PRAGMA table_info(blocked_instances)").all() as Array<{ name: string }>
+      ).map((c) => c.name),
+    );
+    if (!cols.has("expires_at"))
+      this.db.exec("ALTER TABLE blocked_instances ADD COLUMN expires_at INTEGER");
+    if (!cols.has("created_by"))
+      this.db.exec("ALTER TABLE blocked_instances ADD COLUMN created_by TEXT");
+    this.db.prepare("UPDATE meta SET value = '2' WHERE key = 'schema_version'").run();
+  }
+
+  /** Current time in Unix seconds (the store's clock; injectable in tests). */
+  nowSeconds(): number {
+    return this.now();
   }
 
   close(): void {
     this.db.close();
   }
 
-  private tx<T>(fn: () => T): T {
+  tx<T>(fn: () => T): T {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const r = fn();
@@ -227,23 +312,41 @@ export class Store {
   }
 
   purgeExpired(): number {
-    return Number(
-      this.db.prepare("DELETE FROM devices WHERE expires_at <= ?").run(this.now()).changes,
-    );
+    const now = this.now();
+    // Expired temporary blocks are housekeeping, not registrations: not counted.
+    this.db.prepare("DELETE FROM blocked_ips WHERE expires_at <= ?").run(now);
+    this.db
+      .prepare("DELETE FROM blocked_instances WHERE expires_at IS NOT NULL AND expires_at <= ?")
+      .run(now);
+    return Number(this.db.prepare("DELETE FROM devices WHERE expires_at <= ?").run(now).changes);
   }
 
   // ---- blocklist -------------------------------------------------------
 
   isBlocked(origin: string): boolean {
-    return !!this.db.prepare("SELECT 1 FROM blocked_instances WHERE origin = ?").get(origin);
+    return !!this.db
+      .prepare(
+        "SELECT 1 FROM blocked_instances WHERE origin = ? AND (expires_at IS NULL OR expires_at > ?)",
+      )
+      .get(origin, this.now());
   }
 
-  block(origin: string, reason: string | null): void {
+  /**
+   * Blocks an origin. `expiresAt` (Unix seconds) makes the block temporary;
+   * `by` records who blocked it (admin e-mail/subject or "cli").
+   */
+  block(
+    origin: string,
+    reason: string | null,
+    opts: { expiresAt?: number | null; by?: string | null } = {},
+  ): void {
     this.db
       .prepare(
-        "INSERT INTO blocked_instances (origin, reason, created_at) VALUES (?, ?, ?) ON CONFLICT(origin) DO UPDATE SET reason = excluded.reason",
+        `INSERT INTO blocked_instances (origin, reason, created_at, expires_at, created_by) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(origin) DO UPDATE SET reason = excluded.reason, created_at = excluded.created_at,
+           expires_at = excluded.expires_at, created_by = excluded.created_by`,
       )
-      .run(origin, reason, this.now());
+      .run(origin, reason, this.now(), opts.expiresAt ?? null, opts.by ?? null);
   }
 
   unblock(origin: string): boolean {
@@ -254,16 +357,119 @@ export class Store {
     );
   }
 
-  listBlocked(): Array<{ origin: string; reason: string | null; createdAt: number }> {
+  listBlocked(): Array<{
+    origin: string;
+    reason: string | null;
+    createdAt: number;
+    expiresAt: number | null;
+    createdBy: string | null;
+  }> {
     return (
       this.db
-        .prepare("SELECT origin, reason, created_at FROM blocked_instances ORDER BY origin")
-        .all() as Array<{
+        .prepare(
+          `SELECT origin, reason, created_at, expires_at, created_by FROM blocked_instances
+           WHERE expires_at IS NULL OR expires_at > ? ORDER BY origin`,
+        )
+        .all(this.now()) as Array<{
         origin: string;
         reason: string | null;
         created_at: number;
+        expires_at: number | null;
+        created_by: string | null;
       }>
-    ).map((r) => ({ origin: r.origin, reason: r.reason, createdAt: r.created_at }));
+    ).map((r) => ({
+      origin: r.origin,
+      reason: r.reason,
+      createdAt: r.created_at,
+      expiresAt: r.expires_at,
+      createdBy: r.created_by,
+    }));
+  }
+
+  // ---- blocked client IP ranges (registrations only) -------------------
+
+  blockIp(cidr: string, reason: string | null, expiresAt: number, by: string | null): void {
+    this.db
+      .prepare(
+        `INSERT INTO blocked_ips (cidr, reason, created_at, expires_at, created_by) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(cidr) DO UPDATE SET reason = excluded.reason, created_at = excluded.created_at,
+           expires_at = excluded.expires_at, created_by = excluded.created_by`,
+      )
+      .run(cidr, reason, this.now(), expiresAt, by);
+  }
+
+  unblockIp(cidr: string): boolean {
+    return Number(this.db.prepare("DELETE FROM blocked_ips WHERE cidr = ?").run(cidr).changes) > 0;
+  }
+
+  listBlockedIps(): Array<{
+    cidr: string;
+    reason: string | null;
+    createdAt: number;
+    expiresAt: number;
+    createdBy: string | null;
+  }> {
+    return (
+      this.db
+        .prepare(
+          "SELECT cidr, reason, created_at, expires_at, created_by FROM blocked_ips WHERE expires_at > ? ORDER BY cidr",
+        )
+        .all(this.now()) as Array<{
+        cidr: string;
+        reason: string | null;
+        created_at: number;
+        expires_at: number;
+        created_by: string | null;
+      }>
+    ).map((r) => ({
+      cidr: r.cidr,
+      reason: r.reason,
+      createdAt: r.created_at,
+      expiresAt: r.expires_at,
+      createdBy: r.created_by,
+    }));
+  }
+
+  // ---- operator settings ------------------------------------------------
+
+  getSetting(key: string): string | null {
+    const row = this.db.prepare("SELECT value FROM settings WHERE key = ?").get(key) as
+      | { value: string }
+      | undefined;
+    return row?.value ?? null;
+  }
+
+  setSetting(key: string, value: string | null): void {
+    if (value === null) {
+      this.db.prepare("DELETE FROM settings WHERE key = ?").run(key);
+      return;
+    }
+    this.db
+      .prepare(
+        `INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(key, value, this.now());
+  }
+
+  /** Emergency pause of all sending (kill switch); null when sending is enabled. */
+  getPause(): { since: number; by: string; reason: string } | null {
+    const raw = this.getSetting("sending_paused");
+    if (!raw) return null;
+    try {
+      const v = JSON.parse(raw) as { since: number; by: string; reason: string };
+      return { since: Number(v.since), by: String(v.by), reason: String(v.reason) };
+    } catch {
+      // A corrupt value fails closed: sending stays paused until resumed.
+      return { since: 0, by: "unknown", reason: "unreadable pause state" };
+    }
+  }
+
+  setPause(p: { by: string; reason: string } | null): void {
+    this.setSetting(
+      "sending_paused",
+      p ? JSON.stringify({ since: this.now(), by: p.by, reason: p.reason }) : null,
+    );
   }
 
   deleteInstanceDevices(origin: string): number {
@@ -312,9 +518,11 @@ export class Store {
         "SELECT instance, COUNT(*) AS n FROM devices GROUP BY instance ORDER BY n DESC LIMIT 20",
       )
       .all() as Array<{ instance: string; n: number }>;
-    const blocked = this.db.prepare("SELECT COUNT(*) AS n FROM blocked_instances").get() as {
-      n: number;
-    };
+    const blocked = this.db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM blocked_instances WHERE expires_at IS NULL OR expires_at > ?",
+      )
+      .get(this.now()) as { n: number };
     const since = new Date((this.now() - days * 86400) * 1000).toISOString().slice(0, 10);
     const daily = this.db
       .prepare(

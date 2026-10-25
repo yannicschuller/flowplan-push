@@ -4,12 +4,12 @@ import {
   ReplayCache,
   verifySignature,
 } from "./auth/signature.ts";
-import { RELAY_TOKEN_PATTERN } from "./crypto/tokens.ts";
+import { hashRelayToken, RELAY_TOKEN_PATTERN } from "./crypto/tokens.ts";
 import type { DeviceRecord, Store } from "./db.ts";
 import type { InstanceKeyResolver } from "./instance/keys.ts";
 import { type Logger, truncateIp } from "./log.ts";
 import type { RelayMetrics } from "./metrics.ts";
-import { rateLimitKeyForIp } from "./net/ip.ts";
+import { ipInCidrs, rateLimitKeyForIp } from "./net/ip.ts";
 import { canonicalOrigin } from "./net/origin.ts";
 import {
   type Message,
@@ -23,11 +23,12 @@ import { buildApnsRequest, buildFcmMessage } from "./push/build.ts";
 import type { FcmClient } from "./push/fcm.ts";
 import type { DeliveryResult } from "./push/types.ts";
 import { TokenBucketLimiter } from "./ratelimit.ts";
+import { noopEventSink, type RelayEventSink, shortDeviceId } from "./stats.ts";
 
 export interface HttpResult {
   status: number;
   body?: unknown;
-  headers?: Record<string, string>;
+  headers?: Record<string, string | string[]>;
 }
 
 export interface RelayLimits {
@@ -64,7 +65,12 @@ export interface RelayDeps {
   logger: Logger;
   limits?: Partial<RelayLimits>;
   now?: () => number;
+  /** Receives per-instance events for the admin dashboard statistics. */
+  events?: RelayEventSink;
 }
+
+/** Retry-After (seconds) answered while sending is paused by the operator. */
+export const PAUSED_RETRY_AFTER_SECONDS = 300;
 
 const err = (
   status: number,
@@ -110,9 +116,11 @@ export class Relay {
   private readonly now: () => number;
   private readonly allowedBundles: Set<string>;
   private readonly d: RelayDeps;
+  private readonly events: RelayEventSink;
 
   constructor(d: RelayDeps) {
     this.d = d;
+    this.events = d.events ?? noopEventSink;
     this.limits = { ...DEFAULT_LIMITS, ...(d.limits ?? {}) };
     this.now = d.now ?? Date.now;
     const l = this.limits;
@@ -148,8 +156,13 @@ export class Relay {
     this.allowedBundles = new Set(d.allowedBundleIds);
   }
 
-  private rateLimited(scope: string, retryAfter: number): HttpResult {
+  private rateLimited(
+    scope: string,
+    retryAfter: number,
+    instance: string | null = null,
+  ): HttpResult {
     this.d.metrics.rateLimited({ scope });
+    this.events.rateLimited({ scope, instance });
     return err(429, "rate_limited", { retryAfter }, { "retry-after": String(retryAfter) });
   }
 
@@ -159,6 +172,10 @@ export class Relay {
     const ipKey = rateLimitKeyForIp(ip);
     const rl = this.registerLimiter.tryTake(ipKey);
     if (!rl.ok) return this.rateLimited("register_ip", rl.retryAfter);
+    if (this.isIpBlocked(ip)) {
+      this.events.refused({ what: "ip_blocked", instance: null });
+      return err(403, "ip_blocked");
+    }
 
     const parsed = registerSchema.safeParse(parseJson(body));
     if (!parsed.success) {
@@ -171,7 +188,10 @@ export class Relay {
     if (!this.allowedBundles.has(req.bundleId)) return err(403, "bundle_not_allowed");
     const instance = canonicalOrigin(req.instance, this.d.allowPrivateInstances);
     if (!instance) return err(400, "invalid_instance");
-    if (this.d.store.isBlocked(instance)) return err(403, "instance_blocked");
+    if (this.d.store.isBlocked(instance)) {
+      this.events.refused({ what: "instance_blocked", instance });
+      return err(403, "instance_blocked");
+    }
 
     const environment =
       req.platform === "android" ? "production" : (req.environment ?? "production");
@@ -184,10 +204,28 @@ export class Relay {
       deviceToken,
     });
     this.d.metrics.registrations({ platform: req.platform });
+    this.events.registration({
+      instance,
+      platform: req.platform,
+      deviceId: shortDeviceId(hashRelayToken(relayToken)),
+      ip,
+    });
     return {
       status: 201,
       body: { relayToken, expiresAt: new Date(expiresAt * 1000).toISOString() },
     };
+  }
+
+  /** Registrations from operator-blocked client IP ranges are refused (temporary blocks). */
+  private isIpBlocked(ip: string): boolean {
+    const ranges = this.d.store.listBlockedIps();
+    return (
+      ranges.length > 0 &&
+      ipInCidrs(
+        ip,
+        ranges.map((r) => r.cidr),
+      )
+    );
   }
 
   // ---- DELETE /v1/devices/{relayToken} -----------------------------------
@@ -203,9 +241,16 @@ export class Relay {
 
   // ---- POST /v1/send -----------------------------------------------------
 
-  private authFailure(ipKey: string, reason: string, status: number, error: string): HttpResult {
-    this.authFailLimiter.take(ipKey, 1);
+  private authFailure(
+    ip: string,
+    reason: string,
+    status: number,
+    error: string,
+    instance: string | null = null,
+  ): HttpResult {
+    this.authFailLimiter.take(rateLimitKeyForIp(ip), 1);
     this.d.metrics.authFailures({ reason });
+    this.events.authFailure({ reason, instance, ip });
     return err(status, error);
   }
 
@@ -221,15 +266,22 @@ export class Relay {
     const rl = this.requestLimiter.tryTake(ipKey);
     if (!rl.ok) return this.rateLimited("request_ip", rl.retryAfter);
 
+    // Emergency kill switch: refuse every send before doing any work.
+    if (this.d.store.getPause()) {
+      this.events.refused({ what: "paused", instance: null });
+      const retryAfter = PAUSED_RETRY_AFTER_SECONDS;
+      return err(503, "relay_paused", { retryAfter }, { "retry-after": String(retryAfter) });
+    }
+
     // The header must already be in canonical form, since it is part of the signed string.
     const instance = canonicalOrigin(instanceHeader, this.d.allowPrivateInstances);
     if (!instance || instance !== instanceHeader) {
-      return this.authFailure(ipKey, "bad_instance", 400, "invalid_instance");
+      return this.authFailure(ip, "bad_instance", 400, "invalid_instance");
     }
     const sig = parseSignatureHeader(signatureHeader);
-    if (!sig) return this.authFailure(ipKey, "bad_signature_header", 401, "invalid_signature");
+    if (!sig) return this.authFailure(ip, "bad_signature_header", 401, "invalid_signature");
     if (!isTimestampFresh(sig.tsNum, this.now())) {
-      return this.authFailure(ipKey, "stale_timestamp", 401, "stale_timestamp");
+      return this.authFailure(ip, "stale_timestamp", 401, "stale_timestamp");
     }
 
     const parsedBody = sendBodySchema.safeParse(parseJson(body));
@@ -238,6 +290,7 @@ export class Relay {
 
     if (this.d.store.isBlocked(instance)) {
       this.d.metrics.authFailures({ reason: "blocked" });
+      this.events.refused({ what: "instance_blocked", instance });
       return err(403, "instance_blocked");
     }
 
@@ -256,13 +309,14 @@ export class Relay {
       if (key.reason === "unreachable") {
         this.d.logger.warn("instance keys unavailable", { instance, detail: key.detail });
         this.d.metrics.authFailures({ reason: "keys_unavailable" });
+        this.events.authFailure({ reason: "keys_unavailable", instance, ip });
         return err(502, "instance_keys_unavailable");
       }
-      return this.authFailure(ipKey, "unknown_key", 401, "unknown_key");
+      return this.authFailure(ip, "unknown_key", 401, "unknown_key", instance);
     }
     if (!verifySignature(key.key, instance, sig, body)) {
       this.d.logger.warn("invalid signature", { instance, kid: sig.kid, ip: truncateIp(ip) });
-      return this.authFailure(ipKey, "invalid_signature", 401, "invalid_signature");
+      return this.authFailure(ip, "invalid_signature", 401, "invalid_signature", instance);
     }
     // PROTOCOL §6.5: a repeated (instance, requestId) within the window is a
     // replay; an identical signature implies an identical body and is caught
@@ -272,10 +326,13 @@ export class Relay {
       !this.replay.checkAndRemember(requestKey, sig.tsNum) ||
       !this.replay.checkAndRemember(`sig:${sig.sigText}`, sig.tsNum)
     ) {
-      return this.authFailure(ipKey, "replayed", 409, "replayed");
+      return this.authFailure(ip, "replayed", 409, "replayed", instance);
     }
 
     const results = await this.deliverAll(instance, rawMessages);
+    const tally: Record<string, number> = {};
+    for (const r of results) tally[r.status] = (tally[r.status] ?? 0) + 1;
+    this.events.sendCompleted({ instance, ip, results: tally });
     return { status: 200, body: { results } };
   }
 
@@ -283,10 +340,11 @@ export class Relay {
     const results: MessageResult[] = new Array(rawMessages.length);
     const tasks: Array<{ index: number; msg: Message; rec: DeviceRecord }> = [];
     const counts = new Map<string, number>();
-    const count = (platform: string, status: string) => {
+    const count = (platform: string, status: string, reason?: string) => {
       const k = `${platform}|${status}`;
       counts.set(k, (counts.get(k) ?? 0) + 1);
       this.d.metrics.messages({ platform, status });
+      this.events.message({ instance, platform, status, reason });
     };
 
     rawMessages.forEach((raw, index) => {
@@ -308,6 +366,7 @@ export class Relay {
       if (rl.granted === 0) {
         results[index] = { status: "rate_limited", retryAfter: rl.retryAfter };
         this.d.metrics.rateLimited({ scope: "instance_messages" });
+        this.events.rateLimited({ scope: "instance_messages", instance });
         count(rec.platform, "rate_limited");
         return;
       }
@@ -323,7 +382,14 @@ export class Relay {
         res = { status: "error", reason: "exception" };
       }
       if (res.status === "ok") this.d.store.touch(rec);
-      if (res.status === "gone") this.d.store.deleteByHash(rec.tokenHash);
+      if (res.status === "gone") {
+        this.d.store.deleteByHash(rec.tokenHash);
+        this.events.deviceGone({
+          instance,
+          platform: rec.platform,
+          deviceId: shortDeviceId(rec.tokenHash),
+        });
+      }
       if (res.status === "error" || res.status === "invalid") {
         this.d.logger.info("delivery not successful", {
           platform: rec.platform,
@@ -332,7 +398,7 @@ export class Relay {
         });
       }
       results[index] = { status: res.status };
-      count(rec.platform, res.status);
+      count(rec.platform, res.status, res.reason);
     });
 
     try {

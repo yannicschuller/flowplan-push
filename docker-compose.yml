@@ -1,5 +1,7 @@
-# Example deployment (Coolify can import this file directly).
-# Secrets belong in Coolify's environment variables / an .env file – never commit them.
+# Example deployment with Docker Compose. Works as-is with `docker compose up -d`
+# and can be imported by platforms that understand compose files (Coolify,
+# Portainer, Dokploy, …). Put secrets into an .env file next to this file or
+# into your platform's secret store – never commit them.
 services:
   push:
     image: ghcr.io/yannicschuller/flowplan-push:latest
@@ -9,22 +11,35 @@ services:
     security_opt: ["no-new-privileges:true"]
     tmpfs: ["/tmp:size=16m,mode=1777"]
     environment:
-      RELAY_PUBLIC_URL: ${RELAY_PUBLIC_URL:-https://push.flowplan.org}
+      RELAY_PUBLIC_URL: ${RELAY_PUBLIC_URL:?set to the public https URL of this relay, e.g. https://push.example.com}
       RELAY_STORAGE_KEY: ${RELAY_STORAGE_KEY:?generate with: openssl rand -base64 32}
       RELAY_STORAGE_KEYS_OLD: ${RELAY_STORAGE_KEYS_OLD:-}
       APNS_KEY_ID: ${APNS_KEY_ID:-}
-      APNS_TEAM_ID: ${APNS_TEAM_ID:-V7N2K54KJN}
+      APNS_TEAM_ID: ${APNS_TEAM_ID:-}
       APNS_KEY: ${APNS_KEY:-}
       FCM_SERVICE_ACCOUNT: ${FCM_SERVICE_ACCOUNT:-}
       FCM_PROJECT_ID: ${FCM_PROJECT_ID:-}
       ALLOWED_BUNDLE_IDS: ${ALLOWED_BUNDLE_IDS:-app.flowplan.mobile}
+      # Reverse-proxy hops in front of the relay (one Traefik/Caddy/nginx = 1).
       TRUST_PROXY: ${TRUST_PROXY:-1}
       METRICS_TOKEN: ${METRICS_TOKEN:-}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Optional admin dashboard at /admin (README "Admin dashboard (OIDC)").
+      # Leave ADMIN_OIDC_ISSUER empty to keep it disabled.
+      ADMIN_OIDC_ISSUER: ${ADMIN_OIDC_ISSUER:-}
+      ADMIN_OIDC_CLIENT_ID: ${ADMIN_OIDC_CLIENT_ID:-}
+      ADMIN_OIDC_CLIENT_SECRET: ${ADMIN_OIDC_CLIENT_SECRET:-}
+      ADMIN_OIDC_SCOPES: ${ADMIN_OIDC_SCOPES:-}
+      ADMIN_EMAILS: ${ADMIN_EMAILS:-}
+      ADMIN_SUBJECTS: ${ADMIN_SUBJECTS:-}
+      ADMIN_GROUPS: ${ADMIN_GROUPS:-}
+      ADMIN_GROUPS_CLAIM: ${ADMIN_GROUPS_CLAIM:-}
+      ADMIN_ALLOWED_IPS: ${ADMIN_ALLOWED_IPS:-}
     volumes:
       - push-data:/data
-    # Behind Coolify/Traefik no port mapping is needed; for a plain Docker host
-    # put a TLS-terminating reverse proxy in front and keep this on localhost.
+    # Put a TLS-terminating reverse proxy in front (Caddy, Traefik, nginx, your
+    # platform's router) and keep this port on localhost. Platforms that route
+    # to the container port themselves do not need the mapping at all.
     ports:
       - "127.0.0.1:8080:8080"
 

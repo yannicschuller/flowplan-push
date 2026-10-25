@@ -7,7 +7,7 @@ Please report vulnerabilities **privately**. Use GitHub's
 (Security → Report a vulnerability), or email the maintainer at the address on the GitHub
 profile. Do not open a public issue. Please include steps to reproduce. You will get an
 answer within a few days. Fixes are released as a new image, and an advisory is published
-once a fix is deployed to `push.flowplan.org`.
+once a fix is deployed to the official relay (`push.flowplan.org`).
 
 Out of scope: denial of service by volume against the public relay, which the rate limits and
 the hosting provider handle, reports from automated scanners without a demonstrated impact,
@@ -25,6 +25,9 @@ and missing headers on endpoints that serve no HTML.
 | Notification content | instance → device | end-to-end encrypted (X25519, HKDF-SHA256, AES-256-GCM); relay, Apple and Google see ciphertext only |
 | Instance signing keys (Ed25519) | instance DB | private key never leaves the instance; public keys at `/.well-known/flowplan-push` |
 | Device decryption keys (X25519) | Keychain / Android Keystore | never leave the device |
+| Admin dashboard sessions | relay DB | only SHA-256 of the 256-bit session id; 30 min idle, 8 h absolute; invalidated when the admin configuration changes |
+| OIDC client secret | relay environment only | sent only to the configured identity provider's token endpoint (https) |
+| Admin audit log | relay DB | append-only (SQLite triggers refuse `UPDATE` and `DELETE`); also written to the log output |
 
 ### Attackers and what stops them
 
@@ -82,6 +85,64 @@ days without use.
 fail. Apps and instances are not browsers. Responses carry `nosniff`, a `default-src 'none'`
 CSP, `frame-ancestors 'none'`, `no-store` and HSTS.
 
+### Admin dashboard (optional)
+
+The dashboard at `/admin` is the only part of the relay that serves HTML and the only part with
+operator powers over the network (block instances and IP ranges, delete registrations, pause all
+sending). It is **disabled unless `ADMIN_OIDC_ISSUER` is set**; then every `/admin` path answers
+404, exactly like any unknown path. The relay API (`/v1/*`, `/healthz`, `/metrics`) does not
+depend on it in any way. When enabled:
+
+**Who can get in.** Only accounts that complete an OpenID Connect login at the configured
+identity provider *and* match `ADMIN_SUBJECTS`, `ADMIN_EMAILS` (with `email_verified` true when
+present) or `ADMIN_GROUPS`. The relay refuses to start with an issuer but no rule, so it can
+never admit "everyone at the provider". The login is Authorization Code + PKCE (S256) + `state`
++ `nonce`; state is server-side, single-use, 10 minutes, bound to the browser by a
+`SameSite=Lax` cookie (prevents login CSRF and injected authorization responses). ID tokens are
+verified with `jose`: signature against the provider's JWKS (asymmetric algorithms only; `none`
+and HS256 are refused), `iss` (plus the RFC 9207 `iss` parameter against mix-up attacks), `aud`,
+`azp`, `exp`/`nbf`/`iat` with 60 s skew and a 10-minute maximum age, and `nonce`. Discovery must
+return the configured issuer, and all provider endpoints must be https. Outbound requests to the
+provider follow no redirects, time out after 5 s and are limited to 256 KB. Sign-in requests
+(login start and callback) are limited to 10 per IP per 10 minutes.
+
+**Session theft and CSRF.** The session cookie `__Host-fp_admin` is `Secure`, `HttpOnly`,
+`SameSite=Strict`, host-only, `Path=/`; the id is 256 random bits, stored only as a hash; a new
+id is issued at every login. Every state-changing request is a POST that must carry the exact
+`Origin` of `RELAY_PUBLIC_URL`, a per-session CSRF token and (when the browser sends it)
+`Sec-Fetch-Site: same-origin`. Actions need a second confirmation whose token is an HMAC over
+the exact parameters, valid for 5 minutes, so a forged or altered request cannot skip the review.
+Admin pages use `Referrer-Policy: same-origin` instead of `no-referrer` because browsers send
+`Origin: null` on form posts under `no-referrer`; no referrer is ever sent to another origin.
+
+**Injection.** All output is HTML-escaped (instance origins, block reasons and IdP-provided
+names are attacker-influenced). The CSP is `default-src 'none'; script-src 'self'; style-src
+'self'; img-src 'self'; connect-src 'self'; form-action 'self' [IdP logout origin];
+frame-ancestors 'none'; base-uri 'none'`: no inline script or style, no third-party resources.
+The live-refresh script only uses `textContent` and DOM APIs.
+
+**Data exposure.** The dashboard shows aggregate counters, instance origins, registration counts,
+hashed 10-character device ids and IPs truncated to /24 or /48 in recent events. It never shows
+device tokens, relay tokens, payloads, signatures, keys or secrets (tested). The audit log keeps
+the full client IP of *administrators*, which the operator needs for accountability.
+
+**Residual risk.** Whoever controls an admin account at the identity provider controls the relay's
+operator functions, and a compromised identity provider can mint tokens for any account. The
+damage is limited to availability (blocking, deleting registrations, pausing): the dashboard
+cannot read notification content, reveal credentials or send pushes. Recommendations:
+
+- set `ADMIN_ALLOWED_IPS` to your VPN or fixed address, so `/admin` is invisible (404) to
+  everyone else;
+- require MFA or passkeys for admin accounts at the identity provider, and bind the OIDC
+  application to an admin group there too;
+- prefer `ADMIN_SUBJECTS` or groups over e-mail addresses (an e-mail address can be re-assigned);
+- keep `TRUST_PROXY` exactly at the number of proxy hops, or the IP allow list can be bypassed
+  with a forged `X-Forwarded-For`;
+- review the audit log; alert on `flowplan_push_sending_paused`.
+
+The CLI inside the container offers the same actions without any network surface and keeps
+working when the identity provider is unavailable.
+
 ### Not covered
 
 - A compromised **instance** can read its own users' notifications. It produces them.
@@ -103,9 +164,11 @@ CSP, `frame-ancestors 'none'`, `no-store` and HSTS.
 
 ### Implementation notes
 
-- Ed25519 verification, X25519, HKDF, AES-GCM, ES256 and RS256 use only `node:crypto`. The
-  only runtime dependency is `zod`, pinned and audited in CI (`npm audit --audit-level=low`).
-  Dependabot watches npm, GitHub Actions and the base image.
+- Ed25519 verification, X25519, HKDF, AES-GCM, ES256 and RS256 for the relay protocol and the
+  APNs/FCM clients use only `node:crypto`. The runtime dependencies are `zod` and, for the
+  admin dashboard's ID-token and JWKS handling, `jose` (zero dependencies, widely used, by the
+  author of `openid-client`). Both are pinned exactly and audited in CI
+  (`npm audit --audit-level=low`). Dependabot watches npm, GitHub Actions and the base image.
 - Secrets are compared in constant time (`crypto.timingSafeEqual` over SHA-256 digests).
 - Base64url input is decoded strictly (canonical encodings only).
 - Logs are structured JSON with field-name redaction. Tokens, payloads and signatures are never
