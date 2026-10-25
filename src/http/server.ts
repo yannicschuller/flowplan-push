@@ -73,9 +73,12 @@ function send(res: ServerResponse, result: HttpResult, hsts: boolean): void {
     ...(result.headers ?? {}),
   };
   if (hsts) headers["strict-transport-security"] = "max-age=63072000; includeSubDomains";
-  let payload: string | undefined;
+  let payload: string | Buffer | undefined;
   if (result.body !== undefined) {
-    payload = typeof result.body === "string" ? result.body : JSON.stringify(result.body);
+    payload =
+      typeof result.body === "string" || Buffer.isBuffer(result.body)
+        ? result.body
+        : JSON.stringify(result.body);
     headers["content-type"] ??= "application/json; charset=utf-8";
     headers["content-length"] = String(Buffer.byteLength(payload));
   }

@@ -16,7 +16,7 @@ import {
   parseIpRange,
   parseOrigin,
 } from "./actions.ts";
-import { ADMIN_CSS, ADMIN_JS } from "./assets.ts";
+import { ASSET_PREFIX, serveAsset } from "./assets.ts";
 import { authorize } from "./authz.ts";
 import { newAuthRequestSecrets, type OidcClient, OidcError } from "./oidc.ts";
 import {
@@ -312,6 +312,7 @@ export class AdminHandler {
       "default-src 'none'",
       "script-src 'self'",
       "style-src 'self'",
+      "font-src 'self'",
       "img-src 'self'",
       "connect-src 'self'",
       `form-action ${formAction.join(" ")}`,
@@ -390,19 +391,9 @@ export class AdminHandler {
     const get = method === "GET" || method === "HEAD";
     if (get) req.resume();
 
-    if (path === "/admin/assets/admin.css" && get) {
-      return {
-        status: 200,
-        body: ADMIN_CSS,
-        headers: { "content-type": "text/css; charset=utf-8" },
-      };
-    }
-    if (path === "/admin/assets/admin.js" && get) {
-      return {
-        status: 200,
-        body: ADMIN_JS,
-        headers: { "content-type": "text/javascript; charset=utf-8" },
-      };
+    if (path.startsWith(ASSET_PREFIX) && get) {
+      const asset = serveAsset(path, url.searchParams.get("v"));
+      if (asset) return asset;
     }
     if (path === "/admin/login" && get) return this.login(req, ip);
     if (path === "/admin/callback" && get) return this.callback(req, url, ip);

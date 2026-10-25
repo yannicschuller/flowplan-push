@@ -79,8 +79,19 @@ export function fmtPct(part: number, total: number): string {
   return `${p < 10 ? p.toFixed(1) : Math.round(p)}%`;
 }
 
-/** Inline SVG sparkline (no inline styles; colours come from CSS classes). */
-export function sparkline(values: number[], cls = "", label = "", path = ""): SafeHtml {
+/**
+ * Inline SVG trend in the app's sparkline style: a line and a light wash
+ * below it (no inline styles; colours come from CSS classes). `path` names
+ * the summary field the client script refreshes it from; `maxId` the element
+ * that shows the current maximum.
+ */
+export function sparkline(
+  values: number[],
+  cls = "",
+  label = "",
+  path = "",
+  opts: { tall?: boolean; maxId?: string } = {},
+): SafeHtml {
   const w = 120;
   const h = 28;
   const max = Math.max(1, ...values);
@@ -88,5 +99,8 @@ export function sparkline(values: number[], cls = "", label = "", path = ""): Sa
   const pts = values
     .map((v, i) => `${((i / n) * w).toFixed(1)},${(h - 1 - (v / max) * (h - 3)).toFixed(1)}`)
     .join(" ");
-  return html`<svg class="spark ${cls}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img" aria-label="${label}"${path ? html` data-s="${path}"` : ""}><polyline points="${pts}"/></svg>`;
+  const grid = opts.tall
+    ? html`<line class="grid" x1="0" y1="1" x2="${w}" y2="1"/><line class="grid" x1="0" y1="${h / 2}" x2="${w}" y2="${h / 2}"/><line class="grid" x1="0" y1="${h}" x2="${w}" y2="${h}"/>`
+    : "";
+  return html`<svg class="spark ${cls}${opts.tall ? " tall" : ""}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" role="img" aria-label="${label}"${path ? html` data-s="${path}"` : ""}${opts.maxId ? html` data-max="${opts.maxId}"` : ""}>${grid}<polygon class="area" points="0,${h} ${pts} ${w},${h}"/><polyline class="line" points="${pts}"/></svg>`;
 }

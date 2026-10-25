@@ -204,6 +204,101 @@ describe("OIDC login", () => {
     assert.ok(!/https?:\/\//.test(css.text), "no external resources");
   });
 
+  it("serves fonts, logo, stylesheet and script with their types, immutable when versioned", async () => {
+    t = await startAdminApp();
+    const page = await t.req("/admin");
+    const css = (await t.req("/admin/assets/admin.css")).text;
+    // Every asset URL of the page and of the stylesheet carries a content hash.
+    const urls = new Set(
+      [...`${page.text}\n${css}`.matchAll(/\/admin\/assets\/[\w./-]+\?v=[0-9a-f]{12}/g)].map(
+        (m) => m[0],
+      ),
+    );
+    const types: Record<string, RegExp> = {
+      ".woff2": /^font\/woff2$/,
+      ".svg": /^image\/svg\+xml$/,
+      ".css": /^text\/css/,
+      ".js": /^text\/javascript/,
+    };
+    const seen = new Set<string>();
+    for (const u of urls) {
+      const ext = /\.\w+(?=\?)/.exec(u)?.[0] ?? "";
+      const r = await t.req(u);
+      assert.equal(r.status, 200, u);
+      assert.match(r.headers.get("content-type") ?? "", types[ext] ?? /^$/, u);
+      assert.equal(r.headers.get("cache-control"), "public, max-age=31536000, immutable", u);
+      assert.equal(r.headers.get("x-content-type-options"), "nosniff", u);
+      if (ext === ".woff2") {
+        const bin: Buffer = Buffer.from(await (await fetch(`${t.url}${u}`)).arrayBuffer());
+        assert.equal(bin.subarray(0, 4).toString("latin1"), "wOF2", `${u} is a WOFF2 file`);
+        assert.equal(r.headers.get("content-length"), String(bin.length));
+      }
+      seen.add(ext);
+    }
+    assert.deepEqual([...seen].sort(), [".css", ".js", ".svg", ".woff2"]);
+    assert.ok([...urls].filter((u) => u.includes("/fonts/")).length >= 6, "all font files");
+    // Without the current hash: served, but revalidated.
+    const stale = await t.req("/admin/assets/fonts/instrument-sans-latin.woff2?v=000000000000");
+    assert.equal(stale.status, 200);
+    assert.equal(stale.headers.get("cache-control"), "no-cache");
+    assert.equal((await t.req("/admin/assets/LICENSE-InstrumentSans.txt")).status, 404);
+    assert.equal((await t.req("/admin/assets/fonts/", { method: "POST" })).status, 404);
+    const csp = page.headers.get("content-security-policy") ?? "";
+    assert.match(csp, /font-src 'self'/);
+    assert.match(csp, /img-src 'self'/);
+  });
+
+  it("references no external origin from any page or the stylesheet", async () => {
+    t = await startAdminApp();
+    const pages: Array<{ name: string; text: string }> = [];
+    pages.push({ name: "login", text: (await t.req("/admin")).text });
+    const { cookie } = await t.login();
+    for (const p of ["/admin", "/admin/audit", "/admin/instance?origin=https%3A%2F%2Fa.example"]) {
+      pages.push({ name: p, text: (await t.req(p, { cookie })).text });
+    }
+    const dash = await t.req("/admin", { cookie });
+    const review = await t.req("/admin/action", {
+      cookie,
+      form: { csrf: t.csrfOf(dash.text), action: "pause_sending", step: "review", reason: "test" },
+    });
+    pages.push({ name: "confirm", text: review.text });
+    pages.push({
+      name: "message",
+      text: (await t.req("/admin/instance?origin=nope", { cookie })).text,
+    });
+    pages.push({
+      name: "denied",
+      text: deniedPage(
+        {
+          sub: "s",
+          email: null,
+          emailVerified: null,
+          groupsClaim: "groups",
+          groupsPresent: false,
+          groups: [],
+        },
+        true,
+      ),
+    });
+    pages.push({ name: "css", text: (await t.req("/admin/assets/admin.css")).text });
+    for (const { name, text } of pages) {
+      assert.ok(text.length > 200, name);
+      const refs = [
+        ...text.matchAll(/\b(?:href|src|action|srcset|poster|data)\s*=\s*"([^"]*)"/g),
+        ...text.matchAll(/url\(\s*["']?([^"')]*)/g),
+        ...text.matchAll(/@import\s+["']([^"']+)/g),
+      ].map((m) => m[1] ?? "");
+      assert.ok(refs.length > 0, name);
+      for (const ref of refs) {
+        assert.ok(
+          /^(\/(?!\/)|#|\?|$)/.test(ref) && !/^\w+:/.test(ref),
+          `${name} references ${ref}`,
+        );
+      }
+      assert.ok(!/<link[^>]+https?:/i.test(text), `${name}: external stylesheet or font`);
+    }
+  });
+
   it("rejects unknown, reused and unbound state", async () => {
     t = await startAdminApp();
     const unknown = await t.req("/admin/callback?state=nope&code=x");

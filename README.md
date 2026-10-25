@@ -374,6 +374,9 @@ must stay publicly accessible.
 An optional web dashboard at `https://push.example.com/admin` for the operator. It is **off
 unless configured** (every `/admin` path answers 404) and sits behind an OpenID Connect login
 with your own identity provider (Authentik, Keycloak, Pocket ID, Zitadel, Google, …).
+It looks like the administration of the Flowplan app itself: the same colours (light and dark,
+following the system setting), type (Instrument Sans, Instrument Serif, JetBrains Mono, served
+by the relay), icons (Phosphor), logo, cards, badges, tables and live sparklines.
 
 What it shows, refreshed every 5 seconds:
 
@@ -536,9 +539,10 @@ but match none of the rules get "not authorized"; the attempt is in the audit lo
   a second, HMAC-bound confirmation (5 minutes) that covers the exact parameters.
 - 10 sign-in requests per IP per 10 minutes (starting a login and the callback count
   separately). `ADMIN_ALLOWED_IPS` hides `/admin` (404) from everyone else.
-- Responses: CSP `default-src 'none'; script-src 'self'; style-src 'self'; …` (no inline code;
-  the small script and stylesheet are served by the relay itself, no CDNs or web fonts),
-  `X-Frame-Options: DENY`, `Cache-Control: no-store`, `Referrer-Policy: same-origin` (not
+- Responses: CSP `default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; …`
+  (no inline code or styles; script, stylesheet, logo and fonts are served by the relay itself,
+  no CDNs or font services), `X-Frame-Options: DENY`, `Cache-Control: no-store` for pages (the
+  static assets carry a content hash in their URL and are cached as `immutable`), `Referrer-Policy: same-origin` (not
   `no-referrer`, because browsers then send `Origin: null` on form posts, which would defeat the
   Origin check; no referrer ever goes to another origin). All values are HTML-escaped.
 - The dashboard never shows device tokens, relay tokens, payloads, signatures or secrets.
@@ -556,7 +560,7 @@ start empty after a restart.
 `GET /admin/callback`, `POST /admin/logout`, `GET /admin/instance?origin=…`,
 `GET /admin/audit`, `POST /admin/action`, `GET /admin/api/summary`,
 `GET /admin/api/instance?origin=…` (JSON for the live refresh, session required),
-`GET /admin/assets/admin.js|admin.css`.
+`GET /admin/assets/admin.js|admin.css|icon.svg|fonts/*.woff2` (`?v=<content hash>`).
 
 ### 8. Operations
 
@@ -754,6 +758,7 @@ src/
   db.ts               SQLite (node:sqlite) storage
   stats.ts            per-minute/per-hour statistics for the dashboard (SQLite, 30 days)
   metrics.ts, log.ts, ratelimit.ts, version.ts
+assets/               logo and fonts of the admin dashboard (see Third-party notices)
 examples/instance.ts  reference instance/device implementation (signing, E2E encryption)
 scripts/gen-vectors.ts generator of tests/vectors.json = docs/test-vectors.json
 ```
@@ -767,3 +772,17 @@ implementation against them. The instance and app implementations should do the 
 ## License
 
 [AGPL-3.0](LICENSE), like Flowplan.
+
+### Third-party notices
+
+The admin dashboard ships these files from the Flowplan app unchanged:
+
+| Files | Project | License |
+| --- | --- | --- |
+| `assets/fonts/instrument-sans-*.woff2` | [Instrument Sans](https://github.com/Instrument/instrument-sans) | SIL Open Font License 1.1, [`assets/fonts/LICENSE-InstrumentSans.txt`](assets/fonts/LICENSE-InstrumentSans.txt) |
+| `assets/fonts/instrument-serif-*.woff2` | [Instrument Serif](https://github.com/Instrument/instrument-serif) | SIL Open Font License 1.1, [`assets/fonts/LICENSE-InstrumentSerif.txt`](assets/fonts/LICENSE-InstrumentSerif.txt) |
+| `assets/fonts/jetbrains-mono-*.woff2` | [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono) | SIL Open Font License 1.1, [`assets/fonts/LICENSE-JetBrainsMono.txt`](assets/fonts/LICENSE-JetBrainsMono.txt) |
+| Icon paths in `src/admin/icons.ts` | [Phosphor Icons](https://phosphoricons.com) | MIT, [`assets/LICENSE-PhosphorIcons.txt`](assets/LICENSE-PhosphorIcons.txt) |
+
+The fonts are the latin and latin-ext subsets the app self-hosts; the licence files travel with
+them into the container image (`/app/assets/fonts`).

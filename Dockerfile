@@ -28,6 +28,8 @@ WORKDIR /app
 # Application files are owned by root and not writable by the runtime user.
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
+# Logo and fonts of the admin dashboard (fonts: SIL OFL 1.1, licences beside them).
+COPY assets ./assets
 COPY package.json LICENSE ./
 USER node
 VOLUME ["/data"]
