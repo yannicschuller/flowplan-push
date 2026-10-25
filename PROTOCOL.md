@@ -170,3 +170,18 @@ Decided after the first relay implementation; all three sides implement these.
    instance's origin when decrypting. The app also ignores messages whose
    `sentAt` is older than 7 days and notification `id`s it has already shown
    (remember the last 200).
+10. **Notes for the Flowplan app (informational, no wire change)**:
+    - `category` (`task` | `comment` | `default`) reaches APNs as
+      `aps.category` unchanged and is deliberately *not* one of the app's
+      registered category identifiers (`flowplan.task`, `flowplan.comment`,
+      `flowplan.read`). Buttons come only from the encrypted plaintext's
+      `category`, which the Notification Service Extension (iOS) or the
+      messaging service (Android) sets after decrypting; a placeholder the
+      extension could not replace therefore never shows buttons without a
+      notification id. Android ignores the outer `category`.
+    - `liveActivity.contentState` is the app's ActivityKit content state as
+      expo-widgets defines it: `{ "name": "<view>", "props": "<the view's props
+      as a JSON string>" }` (views `FlowplanFocus`, `FlowplanTimer`). A push
+      replaces the whole state, so the instance sends every prop the view
+      reads, using the texts the app registered with it (language, time
+      zone, labels).

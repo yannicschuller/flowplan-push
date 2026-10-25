@@ -53,6 +53,9 @@ export function buildApnsRequest(
       "mutable-content": 1,
       sound: "default",
     };
+    // Passed on as is: deliberately not one of the app's registered category
+    // identifiers (PROTOCOL §6.10), so only the Notification Service
+    // Extension – from the decrypted category – can add buttons.
     if (msg.category) aps.category = msg.category;
     if (msg.collapseId) aps["thread-id"] = msg.collapseId;
     if (msg.badge != null) aps.badge = msg.badge;
