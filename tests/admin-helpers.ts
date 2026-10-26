@@ -298,11 +298,11 @@ export async function startAdminApp(o: AdminAppOptions = {}) {
     const hidden: Record<string, string> = {};
     for (const m of review.text.matchAll(/<input type="hidden" name="([^"]+)" value="([^"]*)">/g)) {
       hidden[m[1] as string] = (m[2] as string)
-        .replace(/&amp;/g, "&")
         .replace(/&quot;/g, '"')
         .replace(/&#39;/g, "'")
         .replace(/&lt;/g, "<")
-        .replace(/&gt;/g, ">");
+        .replace(/&gt;/g, ">")
+        .replace(/&amp;/g, "&");
     }
     const final = await req("/admin/action", {
       cookie,
