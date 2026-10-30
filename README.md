@@ -622,7 +622,9 @@ within 30 days, or when they next start with a changed token.
   endpoint returns 404 if `METRICS_TOKEN` is not set. Useful series:
   `flowplan_push_messages_total{platform,status}`, `flowplan_push_auth_failures_total{reason}`,
   `flowplan_push_rate_limited_total{scope}`, `flowplan_push_wellknown_fetches_total{outcome}`,
-  `flowplan_push_devices`, `flowplan_push_sending_paused`. Alert on a rising share of
+  `flowplan_push_devices`, `flowplan_push_instances` (instances with devices),
+  `flowplan_push_instances_active_24h` / `_7d` (instances that sent notifications),
+  `flowplan_push_sending_paused`. Alert on a rising share of
   `status="error"` (credentials, Apple or Google outage) and on `flowplan_push_sending_paused == 1`.
 - The [admin dashboard](#7-admin-dashboard-oidc) shows the same numbers live, per instance.
 - Logs are JSON lines on stdout. They never contain device tokens, relay tokens, payloads or

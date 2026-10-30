@@ -539,6 +539,28 @@ export class Store {
     };
   }
 
+  /** Instances with at least one registered device. */
+  instanceCount(): number {
+    return (
+      this.db.prepare("SELECT COUNT(DISTINCT instance) AS n FROM devices").get() as { n: number }
+    ).n;
+  }
+
+  /**
+   * Instances that sent notifications within the last `hours` (from the hourly
+   * statistics; deltas of the current minute may not be written yet).
+   */
+  activeInstanceCount(hours: number): number {
+    const since = Math.floor(this.now() / 3600) - hours + 1;
+    return (
+      this.db
+        .prepare(
+          "SELECT COUNT(DISTINCT instance) AS n FROM stats_hourly WHERE hour >= ? AND instance != '' AND kind = 'msg'",
+        )
+        .get(since) as { n: number }
+    ).n;
+  }
+
   deviceCount(): number {
     return (this.db.prepare("SELECT COUNT(*) AS n FROM devices").get() as { n: number }).n;
   }

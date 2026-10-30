@@ -63,6 +63,21 @@ export function createApp(config: Config, overrides: AppOverrides = {}): App {
     store.deviceCount(),
   );
   metrics.registry.gauge(
+    "flowplan_push_instances",
+    "Flowplan instances with at least one registered device",
+    () => store.instanceCount(),
+  );
+  metrics.registry.gauge(
+    "flowplan_push_instances_active_24h",
+    "Flowplan instances that sent notifications in the last 24 hours",
+    () => store.activeInstanceCount(24),
+  );
+  metrics.registry.gauge(
+    "flowplan_push_instances_active_7d",
+    "Flowplan instances that sent notifications in the last 7 days",
+    () => store.activeInstanceCount(24 * 7),
+  );
+  metrics.registry.gauge(
     "flowplan_push_replay_cache_entries",
     "Signatures in the replay cache",
     () => relay.replay.size,

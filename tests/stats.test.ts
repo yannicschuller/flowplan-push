@@ -52,6 +52,20 @@ describe("statistics aggregation", () => {
     assert.equal(top[1]?.errors24h, 1);
   });
 
+  it("counts the instances that sent within 24 hours and 7 days", () => {
+    const s = setup();
+    s.stats.message({ instance: "https://a.example.com", platform: "ios", status: "ok" });
+    s.stats.count("reg", "ios", "https://c.example.com"); // registered only, never sent
+    s.stats.flush();
+    s.advance(3 * 86_400_000);
+    s.stats.message({ instance: "https://b.example.com", platform: "android", status: "error" });
+    s.stats.flush();
+    assert.equal(s.store.activeInstanceCount(24), 1);
+    assert.equal(s.store.activeInstanceCount(24 * 7), 2);
+    s.advance(5 * 86_400_000);
+    assert.equal(s.store.activeInstanceCount(24 * 7), 1);
+  });
+
   it("rolls the live window: data older than 60 minutes leaves the last-hour view", () => {
     const s = setup();
     s.stats.count("auth", "invalid_signature", null);
