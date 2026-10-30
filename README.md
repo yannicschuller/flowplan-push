@@ -685,6 +685,8 @@ origins. **Never enable this on a public relay.**
 | `ADMIN_GROUPS_CLAIM` | no | `groups` | Claim holding groups/roles; dots for nested claims (`realm_access.roles`); arrays, strings and objects keyed by role are understood |
 | `ADMIN_ALLOWED_IPS` | no (recommended) | – | Comma-separated IPs/CIDRs allowed to reach `/admin`; everyone else gets 404. Uses the `TRUST_PROXY` client IP |
 | `ADMIN_OIDC_RP_LOGOUT` | no | `true` | Also end the session at the provider (`end_session_endpoint`) on logout |
+| `ADMIN_SESSION_IDLE_MINUTES` | no | `30` | Sign-out after this many minutes without a click (5–1440); the live refresh of an open page does not count |
+| `ADMIN_SESSION_MAX_HOURS` | no | `8` | Sign-out after this many hours at the latest (1–168) |
 
 If APNs or FCM is not configured, the relay starts anyway and answers `error` for messages to
 that platform. If only half of a platform's settings is given (for example a key without a key

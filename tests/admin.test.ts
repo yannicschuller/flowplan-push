@@ -68,6 +68,26 @@ describe("admin configuration", () => {
     assert.throws(() => loadConfig(noIssuer), /ADMIN_OIDC_ISSUER is missing/);
   });
 
+  it("takes the session lengths from the environment, within bounds", () => {
+    const c = loadConfig({
+      ...base(),
+      ADMIN_EMAILS: "admin@example.com",
+      ADMIN_SESSION_IDLE_MINUTES: "480",
+      ADMIN_SESSION_MAX_HOURS: "168",
+    }).admin;
+    assert.equal(c?.sessionIdleSeconds, 480 * 60);
+    assert.equal(c?.sessionAbsoluteSeconds, 168 * 3600);
+    assert.throws(
+      () =>
+        loadConfig({ ...base(), ADMIN_EMAILS: "a@example.com", ADMIN_SESSION_IDLE_MINUTES: "2" }),
+      /between 5 and 1440/,
+    );
+    assert.throws(
+      () => loadConfig({ ...base(), ADMIN_EMAILS: "a@example.com", ADMIN_SESSION_MAX_HOURS: "x" }),
+      /whole number/,
+    );
+  });
+
   it("parses lists, defaults and a stable fingerprint", () => {
     const c = loadConfig({
       ...base(),

@@ -181,6 +181,16 @@ function list(env: Env, name: string): string[] {
 export const ADMIN_SESSION_IDLE_SECONDS = 30 * 60;
 export const ADMIN_SESSION_ABSOLUTE_SECONDS = 8 * 3600;
 
+/** A whole number between `min` and `max` from the environment, else the default. */
+function boundedInt(env: Env, name: string, fallback: number, min: number, max: number): number {
+  const raw = env[name]?.trim();
+  if (!raw) return fallback;
+  if (!/^\d+$/.test(raw)) throw new ConfigError(`${name} must be a whole number`);
+  const n = Number(raw);
+  if (n < min || n > max) throw new ConfigError(`${name} must be between ${min} and ${max}`);
+  return n;
+}
+
 export function parseAdmin(env: Env, publicUrl: string): AdminConfig | null {
   const issuerRaw = env.ADMIN_OIDC_ISSUER?.trim();
   const anyAdminVar = Object.keys(env).some(
@@ -283,8 +293,13 @@ export function parseAdmin(env: Env, publicUrl: string): AdminConfig | null {
     groupsClaim,
     allowedIps,
     rpLogout: bool(env, "ADMIN_OIDC_RP_LOGOUT", true),
-    sessionIdleSeconds: ADMIN_SESSION_IDLE_SECONDS,
-    sessionAbsoluteSeconds: ADMIN_SESSION_ABSOLUTE_SECONDS,
+    // How long a dashboard session lasts without activity, and at most.
+    sessionIdleSeconds:
+      boundedInt(env, "ADMIN_SESSION_IDLE_MINUTES", ADMIN_SESSION_IDLE_SECONDS / 60, 5, 24 * 60) *
+      60,
+    sessionAbsoluteSeconds:
+      boundedInt(env, "ADMIN_SESSION_MAX_HOURS", ADMIN_SESSION_ABSOLUTE_SECONDS / 3600, 1, 7 * 24) *
+      3600,
     fingerprint,
   };
 }
