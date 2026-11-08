@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Bug or idea in Flowplan itself
+    url: https://github.com/yannicschuller/flowplan/issues/new/choose
+    about: The app, the server, the editor, databases and whiteboards.
+  - name: Security issue
+    url: https://github.com/yannicschuller/flowplan-push/security/advisories/new
+    about: Please report vulnerabilities privately, never in a public issue.

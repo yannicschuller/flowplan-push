@@ -1,0 +1,46 @@
+name: Bug report
+description: Something in the push relay does not work as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This repository is the **push relay** (push.flowplan.org and self-hosted relays) that delivers notifications to the iPhone and Android app. Bugs in Flowplan itself belong in the [main Flowplan repository](https://github.com/yannicschuller/flowplan/issues/new/choose).
+  - type: checkboxes
+    id: searched
+    attributes:
+      label: Before you start
+      options:
+        - label: I searched the [existing issues](https://github.com/yannicschuller/flowplan-push/issues?q=is%3Aissue) (open and closed).
+          required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Image tag or commit of the relay, or "push.flowplan.org".
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots
+      description: Please remove tokens, keys and anything private.
+      render: text
