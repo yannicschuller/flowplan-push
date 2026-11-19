@@ -22,7 +22,7 @@ const FCM_TOKEN = /^[A-Za-z0-9_:.-]{32,4096}$/;
 
 export const registerSchema = z
   .object({
-    platform: z.enum(["ios", "android", "ios-liveactivity"]),
+    platform: z.enum(["ios", "android", "ios-liveactivity", "ios-widgets"]),
     token: z.string().min(1).max(4096),
     environment: z.enum(["production", "sandbox"]).nullish(),
     bundleId: z.string().min(1).max(155),
@@ -57,7 +57,7 @@ export const liveActivitySchema = z.object({
 export const messageSchema = z
   .object({
     to: z.string().regex(RELAY_TOKEN_PATTERN),
-    type: z.enum(["alert", "background", "liveactivity"]),
+    type: z.enum(["alert", "background", "liveactivity", "widgets"]),
     payload: z.string().max(8192).nullish(),
     category: z.enum(["task", "comment", "default"]).nullish(),
     collapseId: z
@@ -80,6 +80,13 @@ export const messageSchema = z
         ctx.addIssue({ code: "custom", path: ["liveActivity"], message: "required" });
       if (m.payload != null)
         ctx.addIssue({ code: "custom", path: ["payload"], message: "not allowed" });
+    } else if (m.type === "widgets") {
+      // PROTOCOL §6.11: a content-free reload signal; widgets fetch their data
+      // from the instance themselves, so nothing else may be carried.
+      for (const field of ["payload", "liveActivity", "category", "collapseId", "badge"] as const) {
+        if (m[field] != null)
+          ctx.addIssue({ code: "custom", path: [field], message: "not allowed" });
+      }
     } else {
       if (m.liveActivity != null)
         ctx.addIssue({ code: "custom", path: ["liveActivity"], message: "not allowed" });

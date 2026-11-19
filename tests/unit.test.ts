@@ -134,6 +134,17 @@ describe("configuration", () => {
     assert.deepEqual(c.allowedBundleIds, ["app.flowplan.mobile"]);
     assert.equal(c.publicUrl, "https://push.flowplan.org");
     assert.equal(c.metricsToken, null);
+    assert.equal(c.widgetPushesPerTokenPerHour, 20);
+  });
+
+  it("reads the widget push cap per relay token", () => {
+    const c = loadConfig({ RELAY_STORAGE_KEY: key, WIDGET_PUSHES_PER_HOUR: "6" });
+    assert.equal(c.widgetPushesPerTokenPerHour, 6);
+    for (const bad of ["0", "3601", "x", "1.5"])
+      assert.throws(
+        () => loadConfig({ RELAY_STORAGE_KEY: key, WIDGET_PUSHES_PER_HOUR: bad }),
+        ConfigError,
+      );
   });
 
   it("parses APNs and FCM credentials (PEM, escaped newlines, base64)", () => {

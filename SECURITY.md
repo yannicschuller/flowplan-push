@@ -55,6 +55,10 @@ never stored.
 which device token, and when. That metadata is unavoidable for push delivery. They cannot read
 content, which is end-to-end encrypted. Live Activity `contentState` is the exception: iOS
 renders it, so it cannot be encrypted (PROTOCOL §2/§3), and instances should keep it minimal.
+Widget push updates (PROTOCOL §6.11) carry no content at all, only `content-changed`; the
+widgets fetch their data from the instance themselves. They are capped per relay token
+(`WIDGET_PUSHES_PER_HOUR`, default 20), so an instance cannot drain a device's battery or
+Apple's widget push budget through the relay.
 
 **An attacker using the relay as an SSRF proxy**: the only outbound requests to
 attacker-chosen hosts are `GET {origin}/.well-known/flowplan-push`. They are made only for

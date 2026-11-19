@@ -27,6 +27,7 @@ export type BuildResult<T> = { ok: true; request: T } | { ok: false; status: "in
 /** Message type must fit the registration's platform. */
 export function typeMatchesPlatform(msg: Message, device: DeviceRecord): boolean {
   if (device.platform === "ios-liveactivity") return msg.type === "liveactivity";
+  if (device.platform === "ios-widgets") return msg.type === "widgets";
   if (device.platform === "android") return msg.type === "alert" || msg.type === "background";
   return msg.type === "alert" || msg.type === "background";
 }
@@ -84,6 +85,24 @@ export function buildApnsRequest(
     };
   }
 
+  if (msg.type === "widgets") {
+    // WidgetKit push update (iOS 26): WidgetKit reloads the app's widget
+    // timelines. Apple: push type `widgets`, topic `<bundleId>.push-type.widgets`,
+    // `aps.content-changed: true`. Priority 5 (power-friendly; the system
+    // budgets widget pushes anyway); no collapse id, no content.
+    return {
+      ok: true,
+      request: {
+        ...base,
+        collapseId: null,
+        topic: `${device.bundleId}.push-type.widgets`,
+        pushType: "widgets",
+        priority: 5,
+        payload: { aps: { "content-changed": true } },
+      },
+    };
+  }
+
   // liveactivity
   const la = msg.liveActivity;
   if (!la) return { ok: false, status: "invalid" };
@@ -111,7 +130,7 @@ export function buildFcmMessage(
   device: DeviceRecord,
   deviceToken: string,
 ): BuildResult<FcmMessage> {
-  if (!typeMatchesPlatform(msg, device) || msg.type === "liveactivity")
+  if (!typeMatchesPlatform(msg, device) || msg.type === "liveactivity" || msg.type === "widgets")
     return { ok: false, status: "invalid" };
   // FCM data values must be strings.
   const data: Record<string, string> = { fp: canonicalPayload(msg.payload), type: msg.type };

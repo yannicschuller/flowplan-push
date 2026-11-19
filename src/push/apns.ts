@@ -19,7 +19,7 @@ const REQUEST_TIMEOUT_MS = 10_000;
 const MAX_RESPONSE_BYTES = 4096;
 export const APNS_MAX_PAYLOAD_BYTES = 4096;
 
-export type ApnsPushType = "alert" | "background" | "liveactivity";
+export type ApnsPushType = "alert" | "background" | "liveactivity" | "widgets";
 
 export interface ApnsRequest {
   deviceToken: string;

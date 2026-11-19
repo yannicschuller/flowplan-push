@@ -181,3 +181,84 @@ describe("encoding helpers", () => {
     assert.ok(!safeEqual("", "x"));
   });
 });
+
+describe("schema migration v3 (ios-widgets)", () => {
+  const OLD_DEVICES = `CREATE TABLE devices (
+    token_hash TEXT PRIMARY KEY, instance TEXT NOT NULL,
+    platform TEXT NOT NULL CHECK (platform IN ('ios','ios-liveactivity','android')),
+    environment TEXT NOT NULL CHECK (environment IN ('production','sandbox')),
+    bundle_id TEXT NOT NULL, device_token_enc TEXT NOT NULL, device_lookup TEXT NOT NULL,
+    key_id TEXT NOT NULL, created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL) STRICT`;
+  const input = (platform: "ios" | "ios-liveactivity" | "ios-widgets") => ({
+    platform,
+    environment: "production" as const,
+    bundleId: "app.flowplan.mobile",
+    instance: INSTANCE,
+    deviceToken: apnsToken(),
+  });
+
+  it("rebuilds a devices table from an older version and keeps every registration", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "relay-migrate-"));
+    try {
+      const key = randomKey();
+      const s1 = new Store(dir, new StorageCipher(key));
+      const ios = input("ios");
+      const la = input("ios-liveactivity");
+      const t1 = s1.register(ios).relayToken;
+      const t2 = s1.register(la).relayToken;
+      s1.close();
+
+      // Turn it into a database as the previous version left it (schema 2,
+      // platform CHECK without ios-widgets, only the first index).
+      const raw = new DatabaseSync(path.join(dir, "relay.db"));
+      raw.exec(`ALTER TABLE devices RENAME TO devices_old; ${OLD_DEVICES};
+        INSERT INTO devices SELECT * FROM devices_old; DROP TABLE devices_old;
+        CREATE INDEX devices_lookup ON devices (device_lookup, instance);
+        UPDATE meta SET value = '2' WHERE key = 'schema_version';`);
+      assert.throws(
+        () =>
+          raw.prepare("UPDATE devices SET platform = 'ios-widgets' WHERE platform = 'ios'").run(),
+        /CHECK constraint/,
+      );
+      raw.close();
+
+      const s2 = new Store(dir, new StorageCipher(key));
+      const r1 = s2.findByRelayToken(t1);
+      const r2 = s2.findByRelayToken(t2);
+      assert.ok(r1 && r2, "existing registrations survive the rebuild");
+      assert.equal(r2.platform, "ios-liveactivity");
+      assert.equal(s2.decryptDeviceToken(r1), ios.deviceToken);
+      assert.equal(s2.decryptDeviceToken(r2), la.deviceToken);
+      // Lookup hashes still match: re-registering replaces the old record.
+      assert.equal(s2.register(ios).replaced, 1);
+      const w = s2.register(input("ios-widgets"));
+      assert.equal(s2.findByRelayToken(w.relayToken)?.platform, "ios-widgets");
+      const indexes = (
+        s2.db
+          .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'devices'")
+          .all() as Array<{ name: string }>
+      ).map((r) => r.name);
+      for (const name of ["devices_lookup", "devices_instance", "devices_expires", "devices_key"])
+        assert.ok(indexes.includes(name), name);
+      assert.deepEqual(
+        { ...(s2.db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() ?? {}) },
+        { value: "3" },
+      );
+      assert.throws(
+        () => s2.db.prepare("UPDATE devices SET platform = 'nope'").run(),
+        /CHECK constraint/,
+      );
+      assert.equal(s2.deviceCount(), 3);
+      s2.close();
+
+      // Idempotent: opening again changes nothing.
+      const s3 = new Store(dir, new StorageCipher(key));
+      assert.equal(s3.deviceCount(), 3);
+      assert.ok(s3.findByRelayToken(w.relayToken));
+      s3.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

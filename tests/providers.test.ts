@@ -450,3 +450,57 @@ describe("FCM", () => {
     assert.equal(mapFcmResponse(403, "THIRD_PARTY_AUTH_ERROR"), "error");
   });
 });
+
+describe("widgets (WidgetKit push updates)", () => {
+  const now = 1_700_000_000;
+
+  it("builds an APNs widgets push without content", () => {
+    const b = buildApnsRequest(
+      msg({ type: "widgets", priority: "high" }),
+      rec("ios-widgets", "sandbox"),
+      "ab".repeat(32),
+      now,
+    );
+    assert.ok(b.ok);
+    assert.equal(b.request.pushType, "widgets");
+    assert.equal(b.request.topic, `${BUNDLE}.push-type.widgets`);
+    assert.equal(b.request.priority, 5, "always 5, a requested priority is ignored");
+    assert.equal(b.request.collapseId, null);
+    assert.equal(b.request.environment, "sandbox");
+    assert.equal(b.request.expiration, now + 86_400);
+    assert.deepEqual(b.request.payload, { aps: { "content-changed": true } });
+    const zero = buildApnsRequest(msg({ type: "widgets", ttl: 0 }), rec("ios-widgets"), "x", now);
+    assert.ok(zero.ok);
+    assert.equal(zero.request.expiration, 0);
+  });
+
+  it("rejects widgets to other platforms and other types to widget tokens", () => {
+    assert.equal(buildApnsRequest(msg({ type: "widgets" }), rec("ios"), "x", now).ok, false);
+    assert.equal(
+      buildApnsRequest(msg({ type: "widgets" }), rec("ios-liveactivity"), "x", now).ok,
+      false,
+    );
+    assert.equal(
+      buildApnsRequest(msg({ type: "alert", payload }), rec("ios-widgets"), "x", now).ok,
+      false,
+    );
+    assert.equal(
+      buildApnsRequest(msg({ type: "background", payload }), rec("ios-widgets"), "x", now).ok,
+      false,
+    );
+    assert.equal(buildFcmMessage(msg({ type: "widgets" }), rec("android"), "t").ok, false);
+  });
+
+  it("validates widget messages", () => {
+    const parse = (m: Record<string, unknown>) =>
+      messageSchema.safeParse({ to: "A".repeat(43), type: "widgets", ...m }).success;
+    assert.ok(parse({}));
+    assert.ok(parse({ ttl: 3600, priority: "normal" }));
+    assert.ok(!parse({ payload }));
+    assert.ok(!parse({ collapseId: "x" }));
+    assert.ok(!parse({ badge: 0 }));
+    assert.ok(!parse({ category: "task" }));
+    assert.ok(!parse({ liveActivity: { event: "end", contentState: {} } }));
+    assert.ok(!parse({ ttl: 2_419_201 }));
+  });
+});

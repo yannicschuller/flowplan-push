@@ -608,3 +608,97 @@ describe("health and metrics", () => {
     assert.ok(!text.includes(ios.relayToken));
   });
 });
+
+describe("widget push updates (ios-widgets / type widgets)", () => {
+  async function registerWidgets(r: TestRelay, token = apnsToken()) {
+    const res = await r.register({
+      platform: "ios-widgets",
+      token,
+      environment: "production",
+      bundleId: BUNDLE,
+      instance: INSTANCE,
+    });
+    assert.equal(res.status, 201);
+    return String(res.json?.relayToken);
+  }
+
+  it("registers its own relay token and sends a WidgetKit push to APNs", async () => {
+    relay = await startRelay();
+    const token = apnsToken();
+    const widgets = await registerWidgets(relay, token);
+    const ios = await relay.registerIos({ token });
+    assert.notEqual(widgets, ios.relayToken);
+    assert.equal(
+      relay.store.findByRelayToken(widgets)?.platform,
+      "ios-widgets",
+      "same APNs token, separate registrations",
+    );
+
+    const r = await relay.send([{ to: widgets, type: "widgets", ttl: 600 }]);
+    assert.deepEqual(r.json, { results: [{ status: "ok" }] });
+    const call = relay.apnsMock?.calls.at(-1);
+    assert.equal(call?.headers[":path"], `/3/device/${token}`);
+    assert.equal(call?.headers["apns-push-type"], "widgets");
+    assert.equal(call?.headers["apns-topic"], `${BUNDLE}.push-type.widgets`);
+    assert.equal(call?.headers["apns-priority"], "5");
+    assert.equal(call?.headers["apns-collapse-id"], undefined);
+    const exp = Number(call?.headers["apns-expiration"]);
+    assert.ok(Math.abs(exp - (Math.floor(Date.now() / 1000) + 600)) <= 2);
+    assert.deepEqual(call?.body, { aps: { "content-changed": true } });
+  });
+
+  it("only accepts content-free widget messages to widget tokens", async () => {
+    relay = await startRelay();
+    const widgets = await registerWidgets(relay);
+    const ios = await relay.registerIos();
+    const r = await relay.send([
+      { to: widgets, type: "widgets" },
+      { to: widgets, type: "widgets", payload: payload() },
+      { to: widgets, type: "widgets", collapseId: "c" },
+      { to: widgets, type: "widgets", badge: 1 },
+      { to: widgets, type: "widgets", category: "task" },
+      { to: widgets, type: "widgets", liveActivity: { event: "end", contentState: {} } },
+      alert(widgets), // alert to a widget token
+      { to: ios.relayToken, type: "widgets" }, // widgets to a normal token
+    ]);
+    assert.deepEqual(
+      (r.json?.results as Array<{ status: string }> | undefined)?.map((x) => x.status),
+      ["ok", "invalid", "invalid", "invalid", "invalid", "invalid", "invalid", "invalid"],
+    );
+    assert.equal(relay.apnsMock?.calls.length, 1);
+  });
+
+  it("caps widget pushes per relay token and hour", async () => {
+    let t = Date.now();
+    relay = await startRelay({ now: () => t, limits: { widgetPushesPerTokenPerHour: 3 } });
+    const r = relay;
+    const a = await registerWidgets(r);
+    const b = await registerWidgets(r);
+    const send = async (msgs: unknown[]) =>
+      ((await r.send(msgs)).json?.results ?? []) as Array<{ status: string; retryAfter?: number }>;
+    const first = await send(Array.from({ length: 4 }, () => ({ to: a, type: "widgets" })));
+    assert.deepEqual(
+      first.map((x) => x.status),
+      ["ok", "ok", "ok", "rate_limited"],
+    );
+    const retryAfter = first[3]?.retryAfter ?? 0;
+    assert.ok(retryAfter > 0 && retryAfter <= 1200, String(retryAfter));
+    // Another token has its own budget; other message types are not affected.
+    const ios = await r.registerIos();
+    assert.deepEqual(
+      (await send([{ to: b, type: "widgets" }, alert(ios.relayToken)])).map((x) => x.status),
+      ["ok", "ok"],
+    );
+    // One push becomes available again after an hour / limit.
+    t += 1_200_000;
+    assert.deepEqual(
+      (
+        await send([
+          { to: a, type: "widgets" },
+          { to: a, type: "widgets" },
+        ])
+      ).map((x) => x.status),
+      ["ok", "rate_limited"],
+    );
+  });
+});

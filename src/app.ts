@@ -58,6 +58,7 @@ export function createApp(config: Config, overrides: AppOverrides = {}): App {
     metrics,
     logger,
     events: stats,
+    limits: { widgetPushesPerTokenPerHour: config.widgetPushesPerTokenPerHour },
   });
   metrics.registry.gauge("flowplan_push_devices", "Registered devices (all platforms)", () =>
     store.deviceCount(),

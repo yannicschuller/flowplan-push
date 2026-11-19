@@ -65,7 +65,11 @@ export interface Config {
   admin: AdminConfig | null;
   /** Build commit (image label), shown on the admin dashboard. */
   commit: string | null;
+  /** PROTOCOL §6.11: widget push updates per relay token and hour (WIDGET_PUSHES_PER_HOUR). */
+  widgetPushesPerTokenPerHour: number;
 }
+
+export const DEFAULT_WIDGET_PUSHES_PER_HOUR = 20;
 
 type Env = Record<string, string | undefined>;
 
@@ -374,5 +378,12 @@ export function loadConfig(env: Env = process.env): Config {
     logLevel,
     admin: parseAdmin(env, publicUrl),
     commit: (env.RELAY_COMMIT ?? "").trim().slice(0, 40) || null,
+    widgetPushesPerTokenPerHour: boundedInt(
+      env,
+      "WIDGET_PUSHES_PER_HOUR",
+      DEFAULT_WIDGET_PUSHES_PER_HOUR,
+      1,
+      3600,
+    ),
   };
 }

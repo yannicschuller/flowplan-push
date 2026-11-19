@@ -64,6 +64,10 @@ DELETE {relay}/v1/devices/{relayToken}      → 204   (sign-out, app removed fro
 Live Activities (iOS): the app registers an activity's push token the same
 way with `"platform": "ios-liveactivity"` and gets a separate relay token.
 
+Widget push updates (iOS 26 WidgetKit, §6.11): the app registers the widget
+push token it gets from WidgetKit with `"platform": "ios-widgets"` and gets
+a separate relay token.
+
 ## 3. Sending (instance → relay)
 
 ```
@@ -83,7 +87,7 @@ instance (→ status `forbidden`, the token is not revealed to exist).
 ```
 Message = {
   "to": "<relayToken>",
-  "type": "alert" | "background" | "liveactivity",
+  "type": "alert" | "background" | "liveactivity" | "widgets",   // widgets: §6.11
   "payload": "<base64url ciphertext, ≤ 3000 bytes decoded>",   // alert/background
   "category": "task" | "comment" | "default" | null,            // iOS action buttons / Android actions
   "collapseId": "<≤ 64 chars>" | null,                           // replaces an earlier notification
@@ -111,6 +115,7 @@ tokens.
 - **iOS alert**: `aps: { alert: { title: "Flowplan", body: <localized "New notification"> }, mutable-content: 1, category, thread-id: collapseId, badge, sound: "default" }`, plus `fp: <payload>`, `apns-collapse-id`, `apns-priority`, `apns-expiration`. The Notification Service Extension decrypts `fp` and replaces title/body/userInfo. If decryption fails the placeholder stays.
 - **iOS background**: `aps: { content-available: 1 }`, `fp: <payload>`, push type background, priority 5.
 - **iOS liveactivity**: push type liveactivity, topic `<bundleId>.push-type.liveactivity`, `aps: { timestamp, event, content-state, stale-date, dismissal-date }`.
+- **iOS widgets**: push type widgets, topic `<bundleId>.push-type.widgets`, priority 5, `apns-expiration` from `ttl`, no collapse id, `aps: { content-changed: true }` and nothing else (§6.11).
 - **Android**: FCM data-only message `{ fp: <payload>, category, collapseId, badge }`, `android.priority: high|normal`, `collapse_key`, `ttl`. The app's messaging service decrypts and shows the notification itself.
 
 ## 4. End-to-end encryption
@@ -190,3 +195,34 @@ Decided after the first relay implementation; all three sides implement these.
       replaces the whole state, so the instance sends every prop the view
       reads, using the texts the app registered with it (language, time
       zone, labels).
+11. **Widget push updates (v1.2, iOS 26 WidgetKit)**. Additive: nothing changes
+    for instances and apps that do not use them.
+    - *Registration*: `POST /v1/devices` with `"platform": "ios-widgets"` and
+      the widget push token from WidgetKit (`WidgetPushHandler`
+      `pushTokenDidChange(_:widgets:)` → `WidgetPushInfo`; hex, like an APNs
+      device token), `environment` and `bundleId` as for `ios` (the app's
+      bundle id, not the widget extension's). The answer is a separate relay
+      token that only accepts `type: "widgets"`. Same lifetime, re-registration
+      and `DELETE` rules as every other registration.
+    - *Sending*: `{ "to": "<widgets relay token>", "type": "widgets", "ttl"?: <s> }`.
+      The message carries no content: `payload`, `liveActivity`, `category`,
+      `collapseId` and `badge` must be absent or null (else `invalid`);
+      `priority` is accepted and ignored. `widgets` to any other token, or any
+      other type to a widgets token, is `invalid`. A relay without this
+      version answers `invalid` for both the type and the platform, so
+      instances and apps can fall back to timeline reloads.
+    - *What reaches Apple* (Apple, "Updating widgets with WidgetKit push
+      notifications"): `apns-push-type: widgets`,
+      `apns-topic: <bundleId>.push-type.widgets`, `apns-priority: 5`,
+      `apns-expiration: now + ttl` (`0` when `ttl` is 0, default 86400), no
+      `apns-collapse-id`, body `{"aps":{"content-changed":true}}`. WidgetKit
+      then reloads the app's timelines (like `reloadAllTimelines()`); the
+      widgets fetch their data from the instance themselves. Apple budgets
+      these pushes and delivers them opportunistically; broadcast channels
+      are not supported.
+    - *Rate limit*: at most `WIDGET_PUSHES_PER_HOUR` (default 20) widget
+      messages per relay token and hour, as a token bucket (burst = the same
+      number). Over the cap the message is `rate_limited` with `retryAfter`
+      and does not count against the instance's message budget. Instances
+      debounce on their side (at most one per device per 5 minutes is
+      recommended) and retry after `retryAfter` only if something changed.

@@ -16,7 +16,7 @@ import { generateRelayToken, hashRelayToken } from "./crypto/tokens.ts";
  *     append-only admin audit log
  */
 
-export type Platform = "ios" | "ios-liveactivity" | "android";
+export type Platform = "ios" | "ios-liveactivity" | "ios-widgets" | "android";
 export type Environment = "production" | "sandbox";
 
 export const TOKEN_LIFETIME_SECONDS = 180 * 24 * 3600;
@@ -55,12 +55,16 @@ interface DeviceRow {
   expires_at: number;
 }
 
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
-CREATE TABLE IF NOT EXISTS devices (
+export const PLATFORMS: readonly Platform[] = ["ios", "ios-liveactivity", "ios-widgets", "android"];
+export const SCHEMA_VERSION = 3;
+
+/** The devices table; also used to rebuild it when the platform CHECK constraint grows. */
+function devicesTableSql(name: string): string {
+  const platforms = PLATFORMS.map((p) => `'${p}'`).join(",");
+  return `CREATE TABLE IF NOT EXISTS ${name} (
   token_hash        TEXT PRIMARY KEY,
   instance          TEXT NOT NULL,
-  platform          TEXT NOT NULL CHECK (platform IN ('ios','ios-liveactivity','android')),
+  platform          TEXT NOT NULL CHECK (platform IN (${platforms})),
   environment       TEXT NOT NULL CHECK (environment IN ('production','sandbox')),
   bundle_id         TEXT NOT NULL,
   device_token_enc  TEXT NOT NULL,
@@ -69,11 +73,20 @@ CREATE TABLE IF NOT EXISTS devices (
   created_at        INTEGER NOT NULL,
   last_used_at      INTEGER NOT NULL,
   expires_at        INTEGER NOT NULL
-) STRICT;
+) STRICT;`;
+}
+
+const DEVICES_INDEXES = `
 CREATE INDEX IF NOT EXISTS devices_lookup ON devices (device_lookup, instance);
 CREATE INDEX IF NOT EXISTS devices_instance ON devices (instance);
 CREATE INDEX IF NOT EXISTS devices_expires ON devices (expires_at);
 CREATE INDEX IF NOT EXISTS devices_key ON devices (key_id);
+`;
+
+const SCHEMA = `
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
+${devicesTableSql("devices")}
+${DEVICES_INDEXES}
 CREATE TABLE IF NOT EXISTS blocked_instances (
   origin      TEXT PRIMARY KEY,
   reason      TEXT,
@@ -189,8 +202,10 @@ export class Store {
     );
     this.db.exec("PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;");
     this.db.exec(SCHEMA);
+    this.db
+      .prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?)")
+      .run(String(SCHEMA_VERSION));
     this.migrate();
-    this.db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '2')").run();
   }
 
   /** Additive migrations for databases created by older versions. */
@@ -204,7 +219,36 @@ export class Store {
       this.db.exec("ALTER TABLE blocked_instances ADD COLUMN expires_at INTEGER");
     if (!cols.has("created_by"))
       this.db.exec("ALTER TABLE blocked_instances ADD COLUMN created_by TEXT");
-    this.db.prepare("UPDATE meta SET value = '2' WHERE key = 'schema_version'").run();
+    this.migrateDevicePlatforms();
+    this.db
+      .prepare("UPDATE meta SET value = ? WHERE key = 'schema_version'")
+      .run(String(SCHEMA_VERSION));
+  }
+
+  /**
+   * v3: the platform CHECK constraint gained 'ios-widgets'. SQLite cannot alter
+   * a CHECK constraint, so a devices table from an older version is rebuilt
+   * (same columns, rows copied unchanged) inside one transaction.
+   */
+  private migrateDevicePlatforms(): void {
+    const row = this.db
+      .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'devices'")
+      .get() as { sql: string } | undefined;
+    if (!row || PLATFORMS.every((p) => row.sql.includes(`'${p}'`))) return;
+    this.tx(() => {
+      this.db.exec("DROP TABLE IF EXISTS devices_migrate");
+      this.db.exec(devicesTableSql("devices_migrate"));
+      this.db.exec(
+        `INSERT INTO devices_migrate (token_hash, instance, platform, environment, bundle_id,
+           device_token_enc, device_lookup, key_id, created_at, last_used_at, expires_at)
+         SELECT token_hash, instance, platform, environment, bundle_id,
+           device_token_enc, device_lookup, key_id, created_at, last_used_at, expires_at
+         FROM devices`,
+      );
+      this.db.exec("DROP TABLE devices");
+      this.db.exec("ALTER TABLE devices_migrate RENAME TO devices");
+      this.db.exec(DEVICES_INDEXES);
+    });
   }
 
   /** Current time in Unix seconds (the store's clock; injectable in tests). */

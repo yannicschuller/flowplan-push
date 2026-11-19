@@ -102,7 +102,7 @@ What this gives you:
 | A ciphertext is re-sent through another instance | HKDF info and AES-GCM aad are `"flowplan-push-v1\n" + instance`, so a payload only decrypts for the instance it was made for; the app also drops stale (`sentAt` > 7 days) and already shown notification ids |
 | Captured send request is replayed | Timestamp window ±5 min, and a repeated `(instance, requestId)` (and an identical signature) is rejected with 409 within the window |
 | Relay abused for SSRF / port scans | Well-known fetch: HTTPS only, DNS resolved once and every address checked (private, loopback, link-local, CGNAT, multicast, reserved, IPv4-mapped/NAT64/6to4 IPv6), connection pinned to the checked address, no cross-origin redirects, 5 s timeout, 16 KB limit, at most one fetch per origin per minute; origins without any registration are never fetched |
-| Flooding | Per-IP limits (120 registrations/hour, 120 requests/minute, lock-out after repeated auth failures), per-instance limit (600 messages/minute, burst 100), body ≤ 512 KB, ≤ 100 messages |
+| Flooding | Per-IP limits (120 registrations/hour, 120 requests/minute, lock-out after repeated auth failures), per-instance limit (600 messages/minute, burst 100), per-token limit for widget push updates (20/hour), body ≤ 512 KB, ≤ 100 messages |
 | Abusive instance | Block it in the [admin dashboard](#7-admin-dashboard-oidc) or with `cli.js block <origin>`: registrations and sends are refused immediately; an emergency switch pauses all sending |
 
 The full threat model, including what the relay *cannot* protect against, is in
@@ -632,7 +632,9 @@ within 30 days, or when they next start with a changed token.
   are logged truncated (/24, /48). `LOG_LEVEL=debug|info|warn|error`.
 
 **Upgrading.** Push to `main` → CI tests and publishes the image → redeploy (pull the new image
-and restart the container). The database schema migrates itself on start. Pin a commit tag (`:sha-abc1234`) if you want
+and restart the container). The database schema migrates itself on start (schema 3 rebuilds the `devices` table once to
+allow the `ios-widgets` platform; registrations are kept, and older images still run on the
+migrated database). Pin a commit tag (`:sha-abc1234`) if you want
 controlled rollouts. Roll back by deploying the previous tag.
 
 **Scaling.** One container is plenty for this workload. Rate limits and the replay cache live in
@@ -676,6 +678,7 @@ origins. **Never enable this on a public relay.**
 | `TRUST_PROXY` | no | `false` | Number of reverse-proxy hops whose `X-Forwarded-For` is trusted for the client IP (`true` = 1). One Caddy/Traefik/nginx/ingress = `1`, plus one per CDN or load balancer in front |
 | `METRICS_TOKEN` | no | – | Enables `/metrics` with this bearer token (≥ 32 characters) |
 | `LOG_LEVEL` | no | `info` | `debug`, `info`, `warn`, `error`, `silent` |
+| `WIDGET_PUSHES_PER_HOUR` | no | `20` | iOS widget push updates per relay token and hour (1–3600, PROTOCOL §6.11); more are answered `rate_limited` |
 | `RELAY_COMMIT` | no | – (set by the image build) | Commit shown on the admin dashboard |
 | `ADMIN_OIDC_ISSUER` | for the dashboard | – | OIDC issuer URL (https). Unset = admin dashboard disabled, `/admin` answers 404 |
 | `ADMIN_OIDC_CLIENT_ID` | for the dashboard | – | Client ID at the identity provider |
@@ -728,6 +731,12 @@ Notes for implementers:
   `"flowplan-push-v1\n" + instance`, with the origin exactly as in `Flowplan-Instance`.
 - Android data messages carry `fp`, `type` (`alert`/`background`) and, when set, `category`,
   `collapseId` and `badge` (strings).
+- iOS 26 widget push updates (§6.11): the app registers its WidgetKit push token with
+  `"platform": "ios-widgets"` and gets its own relay token; the instance sends
+  `{ "to": …, "type": "widgets" }` without any content. The relay sends APNs push type
+  `widgets`, topic `<bundleId>.push-type.widgets`, priority 5, body
+  `{"aps":{"content-changed":true}}`, and allows at most `WIDGET_PUSHES_PER_HOUR` (20) per
+  relay token and hour. Older relays answer `invalid` for this platform and type.
 - Requests to the relay must use `Content-Type: application/json` and no content encoding.
 
 ## Development

@@ -43,6 +43,11 @@ export interface RelayLimits {
   authFailuresPerIpPer10Min: number;
   /** Parallel provider requests per send call. */
   deliveryConcurrency: number;
+  /**
+   * PROTOCOL §6.11: widget push updates per relay token and hour (burst = the
+   * same number). Apple budgets widget pushes; more would only be dropped.
+   */
+  widgetPushesPerTokenPerHour: number;
 }
 
 export const DEFAULT_LIMITS: RelayLimits = {
@@ -52,6 +57,7 @@ export const DEFAULT_LIMITS: RelayLimits = {
   requestsPerIpPerMinute: 120,
   authFailuresPerIpPer10Min: 30,
   deliveryConcurrency: 16,
+  widgetPushesPerTokenPerHour: 20,
 };
 
 export interface RelayDeps {
@@ -112,6 +118,8 @@ export class Relay {
   readonly requestLimiter: TokenBucketLimiter;
   readonly authFailLimiter: TokenBucketLimiter;
   readonly instanceLimiter: TokenBucketLimiter;
+  /** Keyed by the relay token's hash (never the token itself). */
+  readonly widgetLimiter: TokenBucketLimiter;
   readonly replay: ReplayCache;
   private readonly now: () => number;
   private readonly allowedBundles: Set<string>;
@@ -149,6 +157,13 @@ export class Relay {
       l.instanceBurst,
       l.instanceMessagesPerMinute,
       60_000,
+      100_000,
+      this.now,
+    );
+    this.widgetLimiter = new TokenBucketLimiter(
+      l.widgetPushesPerTokenPerHour,
+      l.widgetPushesPerTokenPerHour,
+      3_600_000,
       100_000,
       this.now,
     );
@@ -362,7 +377,21 @@ export class Relay {
         count("unknown", "forbidden");
         return;
       }
+      // Per-token widget budget: checked before the instance budget so a
+      // capped widget push does not use up the instance's messages.
+      const isWidgets = msg.type === "widgets" && rec.platform === "ios-widgets";
+      if (isWidgets) {
+        const w = this.widgetLimiter.isExhausted(rec.tokenHash);
+        if (w.exhausted) {
+          results[index] = { status: "rate_limited", retryAfter: w.retryAfter };
+          this.d.metrics.rateLimited({ scope: "widget_token" });
+          this.events.rateLimited({ scope: "widget_token", instance });
+          count(rec.platform, "rate_limited");
+          return;
+        }
+      }
       const rl = this.instanceLimiter.take(instance, 1);
+      if (isWidgets && rl.granted > 0) this.widgetLimiter.take(rec.tokenHash, 1);
       if (rl.granted === 0) {
         results[index] = { status: "rate_limited", retryAfter: rl.retryAfter };
         this.d.metrics.rateLimited({ scope: "instance_messages" });
