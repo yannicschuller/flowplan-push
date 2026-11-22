@@ -314,7 +314,10 @@ server {
    `--read-only --tmpfs /tmp:size=16m --cap-drop=ALL --security-opt=no-new-privileges`.
 8. **Deploy** and check the logs and `/healthz` as described above.
 9. Updates: enable the Coolify **webhook** for the image, or press **Redeploy** after a new
-   image is published. Admin CLI: Coolify's **Terminal** tab opens a shell in the container.
+   image is published. This repository's CI does it by itself: after the image is pushed, the
+   `deploy` job calls the webhook when the repository secrets `COOLIFY_WEBHOOK` (Coolify → the
+   resource → *Webhooks* → *Deploy Webhook*) and `COOLIFY_TOKEN` (an API token with the
+   “deploy” permission) are set. Admin CLI: Coolify's **Terminal** tab opens a shell in the container.
 
 #### Kubernetes and other platforms
 

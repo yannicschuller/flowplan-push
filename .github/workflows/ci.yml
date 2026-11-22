@@ -77,3 +77,34 @@ jobs:
           sbom: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # Once the new image is on ghcr.io, Coolify pulls it and restarts the relay.
+  # Secrets COOLIFY_WEBHOOK (the resource's deploy webhook) and COOLIFY_TOKEN
+  # (API token with the "deploy" permission); Coolify's API must accept
+  # GitHub's runners (Settings → Advanced → API access: allowed IPs).
+  # Without the secrets the job does nothing.
+  deploy:
+    name: Deploy on Coolify
+    needs: image
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions: {}
+    concurrency:
+      group: deploy
+      cancel-in-progress: false
+    steps:
+      - name: Deploy on Coolify
+        env:
+          COOLIFY_WEBHOOK: ${{ secrets.COOLIFY_WEBHOOK }}
+          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+        run: |
+          if [ -z "$COOLIFY_WEBHOOK" ] || [ -z "$COOLIFY_TOKEN" ]; then echo "No Coolify secrets: nothing to deploy."; exit 0; fi
+          # Coolify's answer explains a refusal (e.g. a missing permission).
+          status=$(curl -sS --retry 3 --max-time 60 -o "$RUNNER_TEMP/coolify.json" -w '%{http_code}' -X POST -H "Authorization: Bearer $COOLIFY_TOKEN" "$COOLIFY_WEBHOOK")
+          echo "Coolify answered $status: $(head -c 500 "$RUNNER_TEMP/coolify.json")"
+          if [ "$status" -ge 300 ]; then
+            echo "::error::Coolify did not deploy ($status). 401/403: the API token needs the “deploy” permission and the team of the resource; check Settings → Advanced → API access and its allowed IPs."
+            exit 1
+          fi
+          echo "Rolled out the relay on Coolify." >> "$GITHUB_STEP_SUMMARY"
